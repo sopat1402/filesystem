@@ -33,7 +33,7 @@ It is mainly a discriminator.
 
 Pretty simple for inode search, check the 8 bytes in each byte using byte & (1<<bit)==0 to see if it is free.
 that way, a block for the inodesbitmap has 4096-12=4084 bytes and hence can represent 8*4096 inodes. Same for the
-blocks. I'll have to cuustomise it for a larger disk though. the superblock would need a few tweaks too.
+blocks. I'll have to customise it for a larger disk though. the superblock would need a few tweaks too.
 
 I made a create_disk function. primitive, just to have something to work with. I do need to set the first few bits of
 the block map to 1 because I do not want to allocate the bitmaps, superblock or the inode table.
@@ -47,4 +47,32 @@ Each block has a 12 byte header. So 4084 accessible bytes for the inode table on
 So, number of blocks here = ceil(256*10000/4084)=627. However, 15 inodes can fit per block and fractional writes
 are not allowed so it becomes 667.
 
-670 bits. that gives 83 bytes that are 0xFF and one byte that is 0xCF. 84 total. 96 bytes past the block header.
+670 bits. that gives 83 bytes that are 0xFF and one byte that is 0x3F. 84 total. 96 bytes past the block header.
+
+# Extent tree
+
+Block max extries is actually 339 not 340. It's because of the 12 byte header I added to every block. Matching it
+with the ext4 structure to know what I'm doing won't fly anymore. It's fine ig I got the hang of it. It's a fucking
+tree again but there won't be much depth due to the crazy fanout. I thought I would never have to make a B+ tree again
+in my life but here we are. 
+Thankfully it's not a pure B+ tree. Actually that's a thing for more despair because I already wrote a full B+ tree but
+now, I have to build a special one. But balancing and splitting won't be needed in the same way because it will
+be rare to see something need even 2 layers.
+
+I got rid of inode extent root and external extent root. at a local scale it seems nice but fuck it i got rid of 
+repr c, packed and just made it vectors that way it's just one data type. refactored all over and it is much cleaner.
+
+I put read external block into the impl for tree node. It reads and stores entries.BTW it's 339 because of the block header. (4096-12-8)/12. 8 is the extent node header data like entry count and magic. Now, this caused me quite a lot of a
+headache to finalise because of all the noise out there : my inode will load all 15 entries, even if unused because
+it is fixed size. but the external ones which are all extent tree nodes just with a different max entries will load
+only the necessary entries.
+
+# Block header refactor
+
+Blocks needs flags of clean, dirty, recoverable corruption, irrecoverable corruption. Need to add a u16, which increases
+the size from 12 bytes to 14 bytes. 4096-14=4082 bytes. Each inode is 256 bytes. Still 15 per block. So ig that bitmap
+part is the same, thankfully.
+
+
+
+

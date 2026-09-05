@@ -1,45 +1,9 @@
 use crate::file_errors::FileError;
+use crate::extent_tree::{ExtentTreeNode, ROOT_MAX_ENTRIES,ENTRY_SIZE};
 
-const INODE_SIZE: usize = 256;
-const BLOCK_SIZE: usize = 4096;
-const TOTAL_INODES: usize = 10_000;
-const ENTRY_SIZE: usize = 12;
-const NODE_HEADER_SIZE: usize = 8;
-const EXTENT_HEADER_SIZE: usize = 8; // magic + depth + entry_count + max_entries
-const NON_EXTENT_FIELDS_SIZE: usize = 64;
-const INODE_EXTENTS_BUDGET: usize = INODE_SIZE - NON_EXTENT_FIELDS_SIZE;
-pub const ROOT_MAX_ENTRIES: usize = (INODE_EXTENTS_BUDGET - NODE_HEADER_SIZE) / ENTRY_SIZE;
-pub const BLOCK_MAX_ENTRIES: usize = (BLOCK_SIZE - NODE_HEADER_SIZE) / ENTRY_SIZE; // 340
+pub const INODE_SIZE: usize = 256;
+pub const TOTAL_INODES: usize = 10_000;
 
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct Extent {
-    pub logical_start: u32,
-    pub physical_start: u32,
-    pub length: u32,
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct IndexEntry {
-    pub logical_start: u32,
-    pub child_block: u32,
-    pub _reserved: u32,
-}
-
-#[repr(C, packed)]
-pub struct ExtentTreeNode<const N: usize> {
-    pub magic: u16,
-    pub depth: u16,
-    pub entry_count: u16,
-    pub max_entries: u16,
-    pub entries: [[u8; ENTRY_SIZE]; N],
-}
-
-pub type InodeExtentRoot = ExtentTreeNode<ROOT_MAX_ENTRIES>;
-pub type ExternalExtentBlock = ExtentTreeNode<BLOCK_MAX_ENTRIES>;
-
-#[repr(C, packed)]
 pub struct Inode {
     pub i_mode: u16,
     pub i_uid: u16,
@@ -52,7 +16,7 @@ pub struct Inode {
     pub i_links_count: u16,
     pub i_blocks: u64,
     pub i_flags: u32,
-    pub i_extents: InodeExtentRoot,
+    pub i_extents: ExtentTreeNode,
     pub i_generation: u32,
     pub i_reserved: [u8; 4],
 }
@@ -92,12 +56,15 @@ impl Inode {
         offset += 2;
         let max_entries = u16::from_le_bytes(buf[offset..offset+2].try_into().map_err(|_| FileError::CorruptedINode)?);
         offset += 2;
-        let mut entries = [[0u8; ENTRY_SIZE]; ROOT_MAX_ENTRIES];
-        for slot in entries.iter_mut() {
+        if entry_count>max_entries || entry_count as usize>ROOT_MAX_ENTRIES{
+            return Err(FileError::CorruptedINode);
+        }
+        let mut entries = vec![[0u8; ENTRY_SIZE]; ROOT_MAX_ENTRIES];
+        for slot in &mut entries{
             slot.copy_from_slice(&buf[offset..offset+ENTRY_SIZE]);
             offset += ENTRY_SIZE;
         }
-        let i_extents = InodeExtentRoot {
+        let i_extents = ExtentTreeNode {
             magic,
             depth,
             entry_count,

@@ -1,4 +1,4 @@
-use crate::inode::Extent;
+use crate::extent_tree::Extent;
 
 pub fn find_free_inode(bitmap: &[u8]) -> Option<usize> {
     for i in 0..bitmap.len() {
@@ -64,5 +64,17 @@ pub fn find_blocks(bitmap: &[u8], count: usize) -> Vec<Extent> {
         blocks
     } else {
         Vec::new()
+    }
+}
+
+pub fn mark_blocks_used(bitmap: &mut [u8], extents: &[Extent]) {
+    for extent in extents {
+        let start = extent.physical_start as usize;
+        let length = extent.length as usize;
+        for block in start..start + length {
+            let byte_idx = block / 8;
+            let bit_idx = block % 8;
+            bitmap[byte_idx] |= 1 << bit_idx;
+        }
     }
 }

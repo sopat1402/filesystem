@@ -4,3 +4,4 @@ pub mod inode;
 pub mod crc32;
 pub mod filesystem;
 pub mod bitmaps;
+pub mod extent_tree;

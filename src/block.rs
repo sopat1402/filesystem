@@ -6,9 +6,18 @@ pub const BLOCK_SIZE:usize=4096;
 pub const NUM_BLOCKS:usize=12800;
 const MAGIC:u32=69420;
 
+#[repr(u16)]
+pub enum Flag{
+    Clean,
+    Dirty,
+    Recoverable,
+    Irrecoverable,
+}
+
 pub struct BlockHeader{
     pub lsn         :   u64,
     pub checksum    :   u32,
+    pub flag       :   Flag,
 }
 
 //make this check the checksum on its own
@@ -17,15 +26,33 @@ impl BlockHeader{
     pub fn deserialise(block:&[u8])->Result<Self,FileError>{
         let lsn=u64::from_le_bytes(block[0..8].try_into().map_err(|_| FileError::CorruptedBlock)?);
         let checksum=u32::from_le_bytes(block[8..12].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        Ok(Self{lsn,checksum})
+        let flag=match u16::from_le_bytes(block[12..14].try_into().map_err(|_| FileError::CorruptedBlock)?){
+            0=>Flag::Clean,
+            1=>Flag::Dirty,
+            2=>Flag::Recoverable,
+            3=>Flag::Irrecoverable,
+            _=>return Err(FileError::CorruptedBlock),
+        };
+        Ok(Self{lsn,
+            checksum,
+            flag,
+            })
     }
 
     pub fn serialise(&self)->Vec<u8>{
-        let mut buf=vec![0u8;12];
+        let mut buf=vec![0u8;14];
         let lsn_bytes=self.lsn.to_le_bytes();
         let checksum_bytes=self.checksum.to_le_bytes();
+        let flag:u16=match self.flag{
+            Flag::Clean=>0,
+            Flag::Dirty=>1,
+            Flag::Recoverable=>2,
+            Flag::Irrecoverable=>3,
+        };
+        let flag_bytes=flag.to_le_bytes();
         buf[0..8].copy_from_slice(&lsn_bytes);
         buf[8..12].copy_from_slice(&checksum_bytes);
+        buf[12..14].copy_from_slice(&flag_bytes);
         buf
     }
 }
@@ -54,7 +81,7 @@ impl SuperBlock{
         let mut block=vec![0u8;BLOCK_SIZE];
         disk.read_at(&mut block,0).map_err(|_| FileError::ReadError)?;
         let header=BlockHeader::deserialise(&block)?;
-        let mut offset=12;
+        let mut offset=14;
         let magic=u32::from_le_bytes(block[offset..offset+4].try_into().map_err(|_| FileError::CorruptedBlock)?);
         offset+=4;
         if magic!=MAGIC{
@@ -112,8 +139,8 @@ impl SuperBlock{
         let mut block = vec![0u8; BLOCK_SIZE];
         let mut offset: usize = 0;
         let header = self.header.serialise();
-        block[offset..offset+12].copy_from_slice(&header);
-        offset += 12;
+        block[offset..offset+14].copy_from_slice(&header);
+        offset += 14;
         block[offset..offset+4].copy_from_slice(&self.magic.to_le_bytes());
         offset += 4;
         block[offset..offset+4].copy_from_slice(&self.version.to_le_bytes());
@@ -156,7 +183,7 @@ pub struct Block{
 impl Block{
     pub fn serialise(&mut self){
         let header_bytes=self.header.serialise();
-        self.buf[0..12].copy_from_slice(&header_bytes);
+        self.buf[0..14].copy_from_slice(&header_bytes);
     }
     pub fn deserialise(disk:&File,id:usize)->Result<Self,FileError>{
         if id==0{
