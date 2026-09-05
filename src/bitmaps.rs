@@ -78,3 +78,31 @@ pub fn mark_blocks_used(bitmap: &mut [u8], extents: &[Extent]) {
         }
     }
 }
+
+pub fn mark_blocks_free(bitmap: &mut [u8], extents: &[Extent]) {
+    for extent in extents {
+        let start = extent.physical_start as usize;
+        let length = extent.length as usize;
+        for block in start..start + length {
+            let byte_idx = block / 8;
+            let bit_idx = block % 8;
+            bitmap[byte_idx] &= !(1 << bit_idx);
+        }
+    }
+}
+
+pub fn mark_block_free(bitmap: &mut [u8], block: usize) {
+    bitmap[block / 8] &= !(1 << (block % 8));
+}
+
+pub fn mark_inode_used(bitmap: &mut [u8], inode: usize) {
+    let byte_idx = inode / 8;
+    let bit_idx = inode % 8;
+    bitmap[byte_idx] |= 1 << bit_idx;
+}
+
+pub fn mark_inode_free(bitmap: &mut [u8], inode: usize) {
+    let byte_idx = inode / 8;
+    let bit_idx = inode % 8;
+    bitmap[byte_idx] &= !(1 << bit_idx);
+}

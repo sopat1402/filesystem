@@ -59,11 +59,12 @@ impl Inode {
         if entry_count>max_entries || entry_count as usize>ROOT_MAX_ENTRIES{
             return Err(FileError::CorruptedINode);
         }
-        let mut entries = vec![[0u8; ENTRY_SIZE]; ROOT_MAX_ENTRIES];
-        for slot in &mut entries{
-            slot.copy_from_slice(&buf[offset..offset+ENTRY_SIZE]);
+        let mut entries = vec![[0u8; ENTRY_SIZE]; entry_count as usize];
+        for slot in &mut entries {
+            slot.copy_from_slice(&buf[offset..offset + ENTRY_SIZE]);
             offset += ENTRY_SIZE;
         }
+        offset += (ROOT_MAX_ENTRIES - entry_count as usize) * ENTRY_SIZE;
         let i_extents = ExtentTreeNode {
             magic,
             depth,
@@ -131,8 +132,10 @@ impl Inode {
         offset += 2;
         buf[offset..offset+2].copy_from_slice(&self.i_extents.max_entries.to_le_bytes());
         offset += 2;
-        for slot in self.i_extents.entries.iter() {
-            buf[offset..offset+ENTRY_SIZE].copy_from_slice(slot);
+        for i in 0..ROOT_MAX_ENTRIES {
+            if i < self.i_extents.entries.len() {
+                buf[offset..offset + ENTRY_SIZE].copy_from_slice(&self.i_extents.entries[i]);
+            }
             offset += ENTRY_SIZE;
         }
         buf[offset..offset+4].copy_from_slice(&self.i_generation.to_le_bytes());

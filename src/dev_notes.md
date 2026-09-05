@@ -73,6 +73,22 @@ Blocks needs flags of clean, dirty, recoverable corruption, irrecoverable corrup
 the size from 12 bytes to 14 bytes. 4096-14=4082 bytes. Each inode is 256 bytes. Still 15 per block. So ig that bitmap
 part is the same, thankfully.
 
+# Extent tree insertion
 
+AAAAAH I fucking hate trees. This shit is just like a B+ tree but then I don't need to worry as much about crazy depth
+because of the fanout. On top of the basic insertion, I had to make my extents merge when I could make them but
+also have to check for overlap and also when a block is freed in the process of insertion, it needs to be pushed to
+a freed vector for my bitmap to then mark as freed.
+
+I forgot to make a mark as free function in my bitmap but after checking the insertion logic here, I'll write it.
+
+This extent tree is easily the WORST part of this project just like the B+ tree was the worst part of my database. I
+hate trees. I hate trees. I hate trees. I hate trees.
+
+Also, there's a crash window I have to fix with atomicity in my ARIES where a block when split may end up orphaned if
+a crash occurs before success. Ordering tricks won't fix that and it'll only be clear after actually seeing the bug in
+action later when the filesystem actually does something other than give its developer a throbbing headache.
+
+K I added it. I'll do a commit here and btw I also added methods to mark inodes as used and free too.
 
 
