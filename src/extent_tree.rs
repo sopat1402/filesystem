@@ -8,7 +8,7 @@ use std::os::unix::prelude::FileExt;
 pub const ENTRY_SIZE: usize = 12;
 const NODE_HEADER_SIZE: usize = 8;
 const BLOCK_HEADER_SIZE: usize = 14;
-const NON_EXTENT_FIELDS_SIZE: usize = 64;
+const NON_EXTENT_FIELDS_SIZE: usize = 68;
 const INODE_EXTENTS_BUDGET: usize = INODE_SIZE - NON_EXTENT_FIELDS_SIZE;
 pub const ROOT_MAX_ENTRIES: usize =(INODE_EXTENTS_BUDGET - NODE_HEADER_SIZE) / ENTRY_SIZE;
 pub const BLOCK_MAX_ENTRIES: usize =(BLOCK_SIZE - BLOCK_HEADER_SIZE - NODE_HEADER_SIZE) / ENTRY_SIZE;
@@ -16,8 +16,8 @@ pub const BLOCK_MAX_ENTRIES: usize =(BLOCK_SIZE - BLOCK_HEADER_SIZE - NODE_HEADE
 const TREE_MAGIC:u16=1234;
 
 pub enum InsertResult {
-    Done,
-    Split { key: u32, new_block: u32 },
+    Done { new_min: u32 },
+    Split { key: u32, new_block: u32, new_min: u32 },
 }
 
 pub enum DeleteResult { 
@@ -153,7 +153,44 @@ pub fn write_external_block(
     Ok(())
 }
 
+pub fn range_lookup(
+    disk: &File,
+    node: &ExtentTreeNode,
+    start: u32,
+    end: u32,
+) -> Result<Vec<Extent>, FileError> {
+    let mut out = Vec::new();
+    collect_range(disk, node, start, end, &mut out)?;
+    Ok(out)
+}
 
+fn collect_range(
+    disk: &File,
+    node: &ExtentTreeNode,
+    start: u32,
+    end: u32,
+    out: &mut Vec<Extent>,
+) -> Result<(), FileError> {
+    if node.is_leaf() {
+        for i in 0..node.entries.len() {
+            let e = node.get_extent(i);
+            if e.logical_start < end && e.logical_end() > start {
+                out.push(e);
+            }
+        }
+        return Ok(());
+    }
+    let first = find_child(node, start);
+    for i in first..node.entries.len() {
+        let child_key = node.get_index(i).logical_start;
+        if i > first && child_key >= end {
+            break;
+        }
+        let child = ExtentTreeNode::read_node(disk, node.get_index(i).child_block)?;
+        collect_range(disk, &child, start, end, out)?;
+    }
+    Ok(())
+}
 
 fn find_child(node: &ExtentTreeNode, logical_start: u32) -> usize {
     (0..node.entries.len())
@@ -161,7 +198,6 @@ fn find_child(node: &ExtentTreeNode, logical_start: u32) -> usize {
         .find(|&i| node.get_index(i).logical_start <= logical_start)
         .unwrap_or(0)
 }
-
 fn insert_into_node(
     disk: &File,
     node: &mut ExtentTreeNode,
@@ -170,49 +206,56 @@ fn insert_into_node(
     alloc_block: &mut impl FnMut() -> Result<u32, FileError>,
     freed: &mut Vec<Extent>,
 ) -> Result<InsertResult, FileError> {
-    let max_entries = if node_block.is_some() { BLOCK_MAX_ENTRIES as u16 } else { ROOT_MAX_ENTRIES as u16};
-    let result = if node.is_leaf() {
-        insert_leaf(disk, node, new_ext, max_entries, alloc_block, freed)?
-    } else {
-        let i = find_child(node, new_ext.logical_start);
-        let idx = node.get_index(i);
-        let (mut blk, mut child) = ExtentTreeNode::read_node_with_block(disk, idx.child_block)?;
-        match insert_into_node(disk, &mut child, Some(idx.child_block), new_ext, alloc_block, freed)? {
-            InsertResult::Done => {
-                write_external_block(disk, &mut blk, &child)?;
-                InsertResult::Done
-            }
-            InsertResult::Split { key, new_block } => {
-                write_external_block(disk, &mut blk, &child)?;
-                let mut indices: Vec<IndexEntry> =
-                    node.entries.iter().map(IndexEntry::from_bytes).collect();
-                let pos = indices.partition_point(|e| e.logical_start < key);
-                indices.insert(pos, IndexEntry { logical_start: key, child_block: new_block, _reserved: 0 });
-                if indices.len() <= max_entries as usize {
-                    node.entries = indices.iter().map(IndexEntry::to_bytes).collect();
-                    node.entry_count = indices.len() as u16;
-                    InsertResult::Done
-                } else {
-                    let mid = indices.len() / 2;
-                    let right = indices.split_off(mid);
-                    let split_key = right[0].logical_start;
-                    node.entries = indices.iter().map(IndexEntry::to_bytes).collect();
-                    node.entry_count = indices.len() as u16;
-                    let right_block = alloc_block()?;
-                    let right_node = ExtentTreeNode {
-                        magic: TREE_MAGIC,
-                        depth: node.depth,
-                        entry_count: right.len() as u16,
-                        max_entries: BLOCK_MAX_ENTRIES as u16,
-                        entries: right.iter().map(IndexEntry::to_bytes).collect(),
-                    };
-                    let mut blk = Block::deserialise(disk, right_block as usize)?;
-                    write_external_block(disk, &mut blk, &right_node)?;
-                    InsertResult::Split { key: split_key, new_block: right_block }
-                }
+    let max_entries = if node_block.is_some() { BLOCK_MAX_ENTRIES as u16 } else { ROOT_MAX_ENTRIES as u16 };
+
+    if node.is_leaf() {
+        return insert_leaf(disk, node, new_ext, max_entries, alloc_block, freed);
+    }
+
+    let i = find_child(node, new_ext.logical_start);
+    let idx = node.get_index(i);
+    let (mut blk, mut child) = ExtentTreeNode::read_node_with_block(disk, idx.child_block)?;
+
+    let mut indices: Vec<IndexEntry> = node.entries.iter().map(IndexEntry::from_bytes).collect();
+
+    let result = match insert_into_node(disk, &mut child, Some(idx.child_block), new_ext, alloc_block, freed)? {
+        InsertResult::Done { new_min } => {
+            write_external_block(disk, &mut blk, &child)?;
+            indices[i].logical_start = new_min;
+            InsertResult::Done { new_min: indices[0].logical_start }
+        }
+        InsertResult::Split { key, new_block, new_min } => {
+            write_external_block(disk, &mut blk, &child)?;
+            indices[i].logical_start = new_min;
+
+            let pos = indices.partition_point(|e| e.logical_start < key);
+            indices.insert(pos, IndexEntry { logical_start: key, child_block: new_block, _reserved: 0 });
+
+            if indices.len() <= max_entries as usize {
+                InsertResult::Done { new_min: indices[0].logical_start }
+            } else {
+                let mid = indices.len() / 2;
+                let right = indices.split_off(mid);
+                let split_key = right[0].logical_start;
+
+                let right_block = alloc_block()?;
+                let right_node = ExtentTreeNode {
+                    magic: TREE_MAGIC,
+                    depth: node.depth,
+                    entry_count: right.len() as u16,
+                    max_entries: BLOCK_MAX_ENTRIES as u16,
+                    entries: right.iter().map(IndexEntry::to_bytes).collect(),
+                };
+                let mut rblk = Block::deserialise(disk, right_block as usize)?;
+                write_external_block(disk, &mut rblk, &right_node)?;
+
+                InsertResult::Split { key: split_key, new_block: right_block, new_min: indices[0].logical_start }
             }
         }
     };
+
+    node.entries = indices.iter().map(IndexEntry::to_bytes).collect();
+    node.entry_count = indices.len() as u16;
     Ok(result)
 }
 
@@ -225,20 +268,16 @@ fn insert_leaf(
     freed: &mut Vec<Extent>,
 ) -> Result<InsertResult, FileError> {
     let existing: Vec<Extent> = node.entries.iter().map(Extent::from_bytes).collect();
-
     let new_start = new_ext.logical_start;
     let new_end = new_ext.logical_end();
-
     let mut extents: Vec<Extent> = Vec::with_capacity(existing.len() + 2);
     for e in existing {
         let e_start = e.logical_start;
         let e_end = e.logical_end();
-
         if e_end <= new_start || e_start >= new_end {
             extents.push(e);
             continue;
         }
-
         let overlap_start = e_start.max(new_start);
         let overlap_end = e_end.min(new_end);
         freed.push(Extent {
@@ -246,7 +285,6 @@ fn insert_leaf(
             physical_start: e.physical_start + (overlap_start - e_start),
             length: overlap_end - overlap_start,
         });
-
         if e_start < new_start {
             extents.push(Extent {
                 logical_start: e_start,
@@ -263,9 +301,7 @@ fn insert_leaf(
             });
         }
     }
-
     let pos = extents.partition_point(|e| e.logical_start < new_start);
-
     let merges_with_prev = pos > 0 && {
         let prev = &extents[pos - 1];
         prev.logical_end() == new_start
@@ -276,7 +312,6 @@ fn insert_leaf(
         new_end == next.logical_start
             && new_ext.physical_start + new_ext.length == next.physical_start
     };
-
     match (merges_with_prev, merges_with_next) {
         (true, true) => {
             let next = extents.remove(pos);
@@ -294,11 +329,10 @@ fn insert_leaf(
             extents.insert(pos, new_ext);
         }
     }
-
     if extents.len() <= max_entries as usize {
         node.entries = extents.iter().map(Extent::to_bytes).collect();
         node.entry_count = extents.len() as u16;
-        Ok(InsertResult::Done)
+        Ok(InsertResult::Done { new_min: extents[0].logical_start })
     } else {
         let mid = extents.len() / 2;
         let right = extents.split_off(mid);
@@ -316,11 +350,13 @@ fn insert_leaf(
         };
         let mut blk = Block::deserialise(disk, right_block as usize)?;
         write_external_block(disk, &mut blk, &right_node)?;
-
-        Ok(InsertResult::Split { key, new_block: right_block })
+        Ok(InsertResult::Split {
+            key,
+            new_block: right_block,
+            new_min: extents[0].logical_start,
+        })
     }
 }
-
 pub fn insert_extent(
     disk: &File,
     root: &mut ExtentTreeNode,
@@ -328,10 +364,9 @@ pub fn insert_extent(
     alloc_block: &mut impl FnMut() -> Result<u32, FileError>,
 ) -> Result<Vec<Extent>, FileError> {
     let mut freed: Vec<Extent> = Vec::new();
-
     match insert_into_node(disk, root, None, new_ext, alloc_block, &mut freed)? {
-        InsertResult::Done => Ok(freed),
-        InsertResult::Split { key, new_block } => {
+        InsertResult::Done { .. } => Ok(freed),
+        InsertResult::Split { key, new_block, .. } => {
             let left_block = alloc_block()?;
             let left_node = ExtentTreeNode {
                 magic: TREE_MAGIC,
@@ -397,7 +432,6 @@ fn delete_leaf(node: &mut ExtentTreeNode, start: u32, end: u32, freed: &mut Vec<
             remaining.push(Extent { logical_start: end, physical_start: e.physical_start + off, length: e_end - end });
         }
     }
-
     node.entries = remaining.iter().map(Extent::to_bytes).collect();
     node.entry_count = remaining.len() as u16;
 

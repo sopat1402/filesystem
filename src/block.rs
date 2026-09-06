@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::os::unix::prelude::FileExt;
 use crate::file_errors::FileError;
+use crate::crc32::crc32;
 
 pub const BLOCK_SIZE:usize=4096;
 pub const NUM_BLOCKS:usize=12800;
@@ -33,6 +34,9 @@ impl BlockHeader{
             3=>Flag::Irrecoverable,
             _=>return Err(FileError::CorruptedBlock),
         };
+        if crc32(&block[14..]) != checksum {
+            return Err(FileError::CorruptedBlock);
+        }
         Ok(Self{lsn,
             checksum,
             flag,
@@ -175,19 +179,20 @@ impl SuperBlock{
 }
 
 pub struct Block{
-    pub id      :   usize, //0 indexed from superblock
+    pub id      :   usize,
     pub header  :   BlockHeader,
     pub buf     :   Vec<u8>,
 }
 
 impl Block{
     pub fn serialise(&mut self){
+        self.header.checksum = crc32(&self.buf[14..]);
         let header_bytes=self.header.serialise();
         self.buf[0..14].copy_from_slice(&header_bytes);
     }
     pub fn deserialise(disk:&File,id:usize)->Result<Self,FileError>{
         if id==0{
-            return Err(FileError::ReadError); //not for superblock
+            return Err(FileError::ReadError);
         }
         let offset:u64=(id*BLOCK_SIZE) as u64;
         let mut buf=vec![0u8;BLOCK_SIZE];
