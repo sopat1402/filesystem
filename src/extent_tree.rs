@@ -13,7 +13,12 @@ const INODE_EXTENTS_BUDGET: usize = INODE_SIZE - NON_EXTENT_FIELDS_SIZE;
 pub const ROOT_MAX_ENTRIES: usize =(INODE_EXTENTS_BUDGET - NODE_HEADER_SIZE) / ENTRY_SIZE;
 pub const BLOCK_MAX_ENTRIES: usize =(BLOCK_SIZE - BLOCK_HEADER_SIZE - NODE_HEADER_SIZE) / ENTRY_SIZE;
 
-const TREE_MAGIC:u16=1234;
+pub const TREE_MAGIC:u16=1234;
+
+const _: () = assert!(
+    NODE_HEADER_SIZE + ROOT_MAX_ENTRIES * ENTRY_SIZE + NON_EXTENT_FIELDS_SIZE == INODE_SIZE,
+    "extent tree root budget doesn't exactly fill INODE_SIZE"
+);
 
 pub enum InsertResult {
     Done { new_min: u32 },

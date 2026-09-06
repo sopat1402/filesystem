@@ -71,9 +71,9 @@ only the necessary entries.
 
 Blocks needs flags of clean, dirty, recoverable corruption, irrecoverable corruption. Need to add a u16, which increases
 the size from 12 bytes to 14 bytes. 4096-14=4082 bytes. Each inode is 256 bytes. Still 15 per block. So ig that bitmap
-part is the same, thankfully.
+part is the same, thankfully. Also the flag header pushes it to 14..98 for the bits.
 
-# Extent tree insertion
+# Extent tree algorithms
 
 AAAAAH I fucking hate trees. This shit is just like a B+ tree but then I don't need to worry as much about crazy depth
 because of the fanout. On top of the basic insertion, I had to make my extents merge when I could make them but
@@ -91,4 +91,5 @@ action later when the filesystem actually does something other than give its dev
 
 K I added it. I'll do a commit here and btw I also added methods to mark inodes as used and free too.
 
-
+Deletion is done. So is traversal. And range lookup. I have to read my code a few times over to figure out what the
+fuck it is that I finally managed to write because tests aren't really possible yet.

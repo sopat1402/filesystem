@@ -1,5 +1,5 @@
 use crate::file_errors::FileError;
-use crate::extent_tree::{ExtentTreeNode, ROOT_MAX_ENTRIES,ENTRY_SIZE};
+use crate::extent_tree::{ExtentTreeNode, ROOT_MAX_ENTRIES,ENTRY_SIZE,TREE_MAGIC};
 
 pub const INODE_SIZE: usize = 256;
 pub const TOTAL_INODES: usize = 10_000;
@@ -50,6 +50,9 @@ impl Inode {
         offset += 4;
         let magic = u16::from_le_bytes(buf[offset..offset+2].try_into().map_err(|_| FileError::CorruptedINode)?);
         offset += 2;
+        if magic!=TREE_MAGIC{
+            return Err(FileError::CorruptedINode);
+        }
         let depth = u16::from_le_bytes(buf[offset..offset+2].try_into().map_err(|_| FileError::CorruptedINode)?);
         offset += 2;
         let entry_count = u16::from_le_bytes(buf[offset..offset+2].try_into().map_err(|_| FileError::CorruptedINode)?);
