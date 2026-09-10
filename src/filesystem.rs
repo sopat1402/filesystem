@@ -1,22 +1,13 @@
 use crate::inode::{Inode};
-use crate::extent_tree::{ExtentTreeNode,TREE_MAGIC,ROOT_MAX_ENTRIES,Extent};
-use crate::block::{SuperBlock,BlockHeader,Block,BLOCK_SIZE,NUM_BLOCKS,Flag};
-use crate::bitmaps::{mark_blocks_used,mark_inode_used};
+use crate::extent_tree::{ExtentTreeNode,Extent};
+use crate::block::{SuperBlock,BlockHeader,Block,Flag};
+use crate::bitmaps::{mark_blocks_used,mark_inode_used,find_free_inode};
 use crate::file_errors::FileError;
 use std::fs::File;
+use std::time::{SystemTime,UNIX_EPOCH};
 use std::os::unix::prelude::FileExt;
+use crate::constants::*;
 
-const TOTAL_INODES: usize = 10_000;
-const INODE_SIZE: usize = 256;
-const INODES_PER_BLOCK: usize = (BLOCK_SIZE - 14) / INODE_SIZE;
-const INODE_TABLE_BLOCKS: usize = (TOTAL_INODES + INODES_PER_BLOCK - 1) / INODES_PER_BLOCK;
-const MAGIC: u32 = 69_420;
-const INODE_BITMAP_START: usize = 1;
-const BLOCK_BITMAP_START: usize = 2;
-const INODE_MAP_START: usize = 3;
-const DATA_START: usize = INODE_MAP_START + INODE_TABLE_BLOCKS;
-const TOTAL_SIZE: usize = NUM_BLOCKS * BLOCK_SIZE;
-const ROOT_INODE_NUM: usize = 1;
 
 fn new_block(id: usize) -> Block {
     let header = BlockHeader { lsn: 0, checksum: 0, flag: Flag::Clean };
@@ -134,3 +125,43 @@ pub fn create_disk(path: &str) -> Result<(), FileError> {
 
     Ok(())
 }
+
+pub fn reserve_inode(disk : &File, mode : u16, uid : u16, gid : u16)->Result<usize,FileError>{
+    let mut superblock=SuperBlock::deserialise(disk)?;
+    let bitmap_block=superblock.inode_bitmap_start;
+    let mut bitmap_block=Block::deserialise(disk,bitmap_block as usize)?;
+    let inode_id=find_free_inode(&bitmap_block.buf[14..]);
+    let inode_id=match inode_id{
+        Some(t)=>t,
+        None=>return Err(FileError::NoInodes),
+    };
+    let mut inode=crate::inode::find_inode(disk,inode_id)?;
+    inode.i_uid=uid;
+    inode.i_gid=gid;
+    inode.i_mode=mode;
+    inode.i_extents=empty_extent_root();
+    inode.i_flags=0;
+    inode.i_blocks=0;
+    inode.i_generation=0;
+    let curr_time=SystemTime::now();
+    let secs: u64 = curr_time.duration_since(UNIX_EPOCH).unwrap().as_secs();
+    inode.i_ctime=secs;
+    inode.i_dtime=0;
+    inode.i_reserved=[0u8;4];
+    inode.i_mtime=secs;
+    inode.i_atime=secs;
+    inode.i_size=0;
+    inode.i_links_count=0;
+    let buf=inode.serialise();
+    crate::inode::write_inode(disk,inode_id,&buf)?;
+    mark_inode_used(&mut bitmap_block.buf[14..],inode_id);
+    bitmap_block.write_block(disk)?;
+    superblock.free_inodes-=1;
+    let buf=superblock.serialise();
+    disk.write_all_at(&buf,0).map_err(|_| FileError::WriteError)?;
+    Ok(inode_id)
+}
+
+
+
+

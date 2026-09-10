@@ -93,3 +93,39 @@ K I added it. I'll do a commit here and btw I also added methods to mark inodes 
 
 Deletion is done. So is traversal. And range lookup. I have to read my code a few times over to figure out what the
 fuck it is that I finally managed to write because tests aren't really possible yet.
+
+
+# Inode reservation
+
+Before being able to reserve an inode, I need to be able to find the inode buffer and deserialise it. If each block
+has a 14 byte header. I changed the root inode to 0. Inode is now 0 indexed too. Just works with buffers. Blow me if
+you don't like it.
+
+K so I made a method to read and write inodes and write blocks. Then I edited the create disk to put root num as 0.
+Then, I put all those messed up constants in a constants.rs. Such spaghetti. It became significantly cleaner.
+
+Then, I made the reserve inode function the takes uid, mode and gid and returns inode number and also sets up the new
+inode with the uid, gid, mode and time and also zeroes out other data and then returns inode id.
+
+So now it is ready for a write methods thing. first directories to add files. Then file IO.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

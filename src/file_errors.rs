@@ -6,6 +6,7 @@ pub enum FileError{
     ReadError,
     CorruptedINode,
     CorruptedBlock,
+    NoInodes,
 }
 
 impl fmt::Display for FileError {
@@ -16,6 +17,7 @@ impl fmt::Display for FileError {
             FileError::ReadError=>"Error reading from file",
             FileError::CorruptedINode=>"Corrupted INode",
             FileError::CorruptedBlock=>"Corrupted block",
+            FileError::NoInodes=>"Out of inodes",
         };
 
         write!(f, "{message}")

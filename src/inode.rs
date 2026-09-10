@@ -1,8 +1,8 @@
 use crate::file_errors::FileError;
-use crate::extent_tree::{ExtentTreeNode, ROOT_MAX_ENTRIES,ENTRY_SIZE,TREE_MAGIC};
-
-pub const INODE_SIZE: usize = 256;
-pub const TOTAL_INODES: usize = 10_000;
+use std::fs::File;
+use crate::block::{Block};
+use crate::extent_tree::{ExtentTreeNode};
+use crate::constants::*;
 
 pub struct Inode {
     pub i_mode: u16,
@@ -148,4 +148,21 @@ impl Inode {
         debug_assert_eq!(offset, INODE_SIZE);
         buf
     }
+}
+
+pub fn find_inode(disk:&File,inode_id:usize)->Result<Inode,FileError>{
+    let block_id=INODE_MAP_START+inode_id/INODES_PER_BLOCK;
+    let offset=14+(inode_id%INODES_PER_BLOCK)*INODE_SIZE;
+    let block=Block::deserialise(disk,block_id)?;
+    let inode=Inode::deserialise(&block.buf[offset..offset+INODE_SIZE])?;
+    Ok(inode)
+}
+
+pub fn write_inode(disk:&File, inode_id:usize, buf:&[u8])->Result<(),FileError>{
+    let block_id=INODE_MAP_START+inode_id/INODES_PER_BLOCK;
+    let offset=14+(inode_id%INODES_PER_BLOCK)*INODE_SIZE;
+    let mut block=Block::deserialise(disk,block_id)?;
+    block.buf[offset..offset+INODE_SIZE].copy_from_slice(buf);
+    block.write_block(disk)?;
+    Ok(())
 }

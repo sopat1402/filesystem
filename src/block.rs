@@ -2,10 +2,7 @@ use std::fs::File;
 use std::os::unix::prelude::FileExt;
 use crate::file_errors::FileError;
 use crate::crc32::crc32;
-
-pub const BLOCK_SIZE:usize=4096;
-pub const NUM_BLOCKS:usize=12800;
-const MAGIC:u32=69420;
+use crate::constants::{BLOCK_SIZE,MAGIC};
 
 #[repr(u16)]
 pub enum Flag{
@@ -20,8 +17,6 @@ pub struct BlockHeader{
     pub checksum    :   u32,
     pub flag       :   Flag,
 }
-
-//make this check the checksum on its own
 
 impl BlockHeader{
     pub fn deserialise(block:&[u8])->Result<Self,FileError>{
@@ -199,5 +194,10 @@ impl Block{
         disk.read_at(&mut buf,offset).map_err(|_| FileError::ReadError)?;
         let header=BlockHeader::deserialise(&buf)?;
         Ok(Self{id,header,buf})
+    }
+    pub fn write_block(&self,disk:&File)->Result<(),FileError>{
+        let offset=self.id*BLOCK_SIZE;
+        disk.write_all_at(&self.buf,offset as u64).map_err(|_| FileError::WriteError)?;
+        Ok(())
     }
 }

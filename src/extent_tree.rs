@@ -1,19 +1,8 @@
-use crate::block::{Block, BLOCK_SIZE};
+use crate::block::{Block};
 use crate::file_errors::FileError;
-use crate::inode::INODE_SIZE;
-
 use std::fs::File;
 use std::os::unix::prelude::FileExt;
-
-pub const ENTRY_SIZE: usize = 12;
-const NODE_HEADER_SIZE: usize = 8;
-const BLOCK_HEADER_SIZE: usize = 14;
-const NON_EXTENT_FIELDS_SIZE: usize = 68;
-const INODE_EXTENTS_BUDGET: usize = INODE_SIZE - NON_EXTENT_FIELDS_SIZE;
-pub const ROOT_MAX_ENTRIES: usize =(INODE_EXTENTS_BUDGET - NODE_HEADER_SIZE) / ENTRY_SIZE;
-pub const BLOCK_MAX_ENTRIES: usize =(BLOCK_SIZE - BLOCK_HEADER_SIZE - NODE_HEADER_SIZE) / ENTRY_SIZE;
-
-pub const TREE_MAGIC:u16=1234;
+use crate::constants::*;
 
 const _: () = assert!(
     NODE_HEADER_SIZE + ROOT_MAX_ENTRIES * ENTRY_SIZE + NON_EXTENT_FIELDS_SIZE == INODE_SIZE,
