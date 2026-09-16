@@ -152,7 +152,7 @@ impl Inode {
 
 pub fn find_inode(disk:&File,inode_id:usize)->Result<Inode,FileError>{
     let block_id=INODE_MAP_START+inode_id/INODES_PER_BLOCK;
-    let offset=14+(inode_id%INODES_PER_BLOCK)*INODE_SIZE;
+    let offset=BLOCK_HEADER_SIZE+(inode_id%INODES_PER_BLOCK)*INODE_SIZE;
     let block=Block::deserialise(disk,block_id)?;
     let inode=Inode::deserialise(&block.buf[offset..offset+INODE_SIZE])?;
     Ok(inode)
@@ -160,7 +160,7 @@ pub fn find_inode(disk:&File,inode_id:usize)->Result<Inode,FileError>{
 
 pub fn write_inode(disk:&File, inode_id:usize, buf:&[u8])->Result<(),FileError>{
     let block_id=INODE_MAP_START+inode_id/INODES_PER_BLOCK;
-    let offset=14+(inode_id%INODES_PER_BLOCK)*INODE_SIZE;
+    let offset=BLOCK_HEADER_SIZE+(inode_id%INODES_PER_BLOCK)*INODE_SIZE;
     let mut block=Block::deserialise(disk,block_id)?;
     block.buf[offset..offset+INODE_SIZE].copy_from_slice(buf);
     block.write_block(disk)?;

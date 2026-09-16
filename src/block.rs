@@ -2,7 +2,7 @@ use std::fs::File;
 use std::os::unix::prelude::FileExt;
 use crate::file_errors::FileError;
 use crate::crc32::crc32;
-use crate::constants::{BLOCK_SIZE,MAGIC};
+use crate::constants::*;
 
 #[repr(u16)]
 pub enum Flag{
@@ -22,14 +22,14 @@ impl BlockHeader{
     pub fn deserialise(block:&[u8])->Result<Self,FileError>{
         let lsn=u64::from_le_bytes(block[0..8].try_into().map_err(|_| FileError::CorruptedBlock)?);
         let checksum=u32::from_le_bytes(block[8..12].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        let flag=match u16::from_le_bytes(block[12..14].try_into().map_err(|_| FileError::CorruptedBlock)?){
+        let flag=match u16::from_le_bytes(block[12..BLOCK_HEADER_SIZE].try_into().map_err(|_| FileError::CorruptedBlock)?){
             0=>Flag::Clean,
             1=>Flag::Dirty,
             2=>Flag::Recoverable,
             3=>Flag::Irrecoverable,
             _=>return Err(FileError::CorruptedBlock),
         };
-        if crc32(&block[14..]) != checksum {
+        if crc32(&block[BLOCK_HEADER_SIZE..]) != checksum {
             return Err(FileError::CorruptedBlock);
         }
         Ok(Self{lsn,
@@ -39,7 +39,7 @@ impl BlockHeader{
     }
 
     pub fn serialise(&self)->Vec<u8>{
-        let mut buf=vec![0u8;14];
+        let mut buf=vec![0u8;BLOCK_HEADER_SIZE];
         let lsn_bytes=self.lsn.to_le_bytes();
         let checksum_bytes=self.checksum.to_le_bytes();
         let flag:u16=match self.flag{
@@ -51,7 +51,7 @@ impl BlockHeader{
         let flag_bytes=flag.to_le_bytes();
         buf[0..8].copy_from_slice(&lsn_bytes);
         buf[8..12].copy_from_slice(&checksum_bytes);
-        buf[12..14].copy_from_slice(&flag_bytes);
+        buf[12..BLOCK_HEADER_SIZE].copy_from_slice(&flag_bytes);
         buf
     }
 }
@@ -80,7 +80,7 @@ impl SuperBlock{
         let mut block=vec![0u8;BLOCK_SIZE];
         disk.read_at(&mut block,0).map_err(|_| FileError::ReadError)?;
         let header=BlockHeader::deserialise(&block)?;
-        let mut offset=14;
+        let mut offset=BLOCK_HEADER_SIZE;
         let magic=u32::from_le_bytes(block[offset..offset+4].try_into().map_err(|_| FileError::CorruptedBlock)?);
         offset+=4;
         if magic!=MAGIC{
@@ -138,8 +138,8 @@ impl SuperBlock{
         let mut block = vec![0u8; BLOCK_SIZE];
         let mut offset: usize = 0;
         let header = self.header.serialise();
-        block[offset..offset+14].copy_from_slice(&header);
-        offset += 14;
+        block[offset..offset+BLOCK_HEADER_SIZE].copy_from_slice(&header);
+        offset += BLOCK_HEADER_SIZE;
         block[offset..offset+4].copy_from_slice(&self.magic.to_le_bytes());
         offset += 4;
         block[offset..offset+4].copy_from_slice(&self.version.to_le_bytes());
@@ -181,9 +181,9 @@ pub struct Block{
 
 impl Block{
     pub fn serialise(&mut self){
-        self.header.checksum = crc32(&self.buf[14..]);
+        self.header.checksum = crc32(&self.buf[BLOCK_HEADER_SIZE..]);
         let header_bytes=self.header.serialise();
-        self.buf[0..14].copy_from_slice(&header_bytes);
+        self.buf[0..BLOCK_HEADER_SIZE].copy_from_slice(&header_bytes);
     }
     pub fn deserialise(disk:&File,id:usize)->Result<Self,FileError>{
         if id==0{
@@ -195,7 +195,8 @@ impl Block{
         let header=BlockHeader::deserialise(&buf)?;
         Ok(Self{id,header,buf})
     }
-    pub fn write_block(&self,disk:&File)->Result<(),FileError>{
+    pub fn write_block(&mut self,disk:&File)->Result<(),FileError>{
+        self.serialise();
         let offset=self.id*BLOCK_SIZE;
         disk.write_all_at(&self.buf,offset as u64).map_err(|_| FileError::WriteError)?;
         Ok(())

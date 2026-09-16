@@ -19,3 +19,5 @@ pub const INODE_MAP_START: usize = 3;
 pub const DATA_START: usize = INODE_MAP_START + INODE_TABLE_BLOCKS;
 pub const TOTAL_SIZE: usize = NUM_BLOCKS * BLOCK_SIZE;
 pub const ROOT_INODE_NUM: usize = 0;
+pub const S_IFDIR: u16 = 0o040000;
+pub const S_IFREG: u16 = 0o100000;

@@ -54,7 +54,7 @@ pub fn create_disk(path: &str) -> Result<(), FileError> {
     let mut inode_bitmap_block = new_block(INODE_BITMAP_START);
     let mut inode_bitmap_buf = vec![0u8; (TOTAL_INODES + 7) / 8];
     mark_inode_used(&mut inode_bitmap_buf, ROOT_INODE_NUM);
-    inode_bitmap_block.buf[14..14 + inode_bitmap_buf.len()].copy_from_slice(&inode_bitmap_buf);
+    inode_bitmap_block.buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + inode_bitmap_buf.len()].copy_from_slice(&inode_bitmap_buf);
     inode_bitmap_block.serialise();
     disk.write_at(&inode_bitmap_block.buf, (INODE_BITMAP_START * BLOCK_SIZE) as u64)
         .map_err(|_| FileError::WriteError)?;
@@ -66,7 +66,7 @@ pub fn create_disk(path: &str) -> Result<(), FileError> {
         physical_start: 0,
         length: DATA_START as u32,
     }]);
-    block_bitmap_block.buf[14..14 + block_bitmap_buf.len()].copy_from_slice(&block_bitmap_buf);
+    block_bitmap_block.buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + block_bitmap_buf.len()].copy_from_slice(&block_bitmap_buf);
     block_bitmap_block.serialise();
     disk.write_at(&block_bitmap_block.buf, (BLOCK_BITMAP_START * BLOCK_SIZE) as u64)
         .map_err(|_| FileError::WriteError)?;
@@ -87,13 +87,15 @@ pub fn create_disk(path: &str) -> Result<(), FileError> {
         i_reserved: [0u8; 4],
     };
     let empty_inode_bytes = empty_inode.serialise();
+    let curr_time = SystemTime::now();
+    let secs: u64 = curr_time.duration_since(UNIX_EPOCH).unwrap().as_secs();
     let root_inode = Inode {
         i_mode: 0o040755,
         i_uid: 0,
         i_size: 0,
-        i_atime: 0,
-        i_ctime: 0,
-        i_mtime: 0,
+        i_atime: secs,
+        i_ctime: secs,
+        i_mtime: secs,
         i_dtime: 0,
         i_gid: 0,
         i_links_count: 2,
@@ -114,7 +116,7 @@ pub fn create_disk(path: &str) -> Result<(), FileError> {
             INODES_PER_BLOCK
         };
         for slot in 0..inodes_in_this_block {
-            let start = 14 + slot * INODE_SIZE;
+            let start = BLOCK_HEADER_SIZE + slot * INODE_SIZE;
             let inode_num = block_idx * INODES_PER_BLOCK + slot;
             let bytes = if inode_num == ROOT_INODE_NUM { &root_inode_bytes } else { &empty_inode_bytes };
             block.buf[start..start + INODE_SIZE].copy_from_slice(bytes);
@@ -130,7 +132,7 @@ pub fn reserve_inode(disk : &File, mode : u16, uid : u16, gid : u16)->Result<usi
     let mut superblock=SuperBlock::deserialise(disk)?;
     let bitmap_block=superblock.inode_bitmap_start;
     let mut bitmap_block=Block::deserialise(disk,bitmap_block as usize)?;
-    let inode_id=find_free_inode(&bitmap_block.buf[14..]);
+    let inode_id=find_free_inode(&bitmap_block.buf[BLOCK_HEADER_SIZE..]);
     let inode_id=match inode_id{
         Some(t)=>t,
         None=>return Err(FileError::NoInodes),
@@ -154,7 +156,7 @@ pub fn reserve_inode(disk : &File, mode : u16, uid : u16, gid : u16)->Result<usi
     inode.i_links_count=0;
     let buf=inode.serialise();
     crate::inode::write_inode(disk,inode_id,&buf)?;
-    mark_inode_used(&mut bitmap_block.buf[14..],inode_id);
+    mark_inode_used(&mut bitmap_block.buf[BLOCK_HEADER_SIZE..],inode_id);
     bitmap_block.write_block(disk)?;
     superblock.free_inodes-=1;
     let buf=superblock.serialise();

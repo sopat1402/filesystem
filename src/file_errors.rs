@@ -7,6 +7,9 @@ pub enum FileError{
     CorruptedINode,
     CorruptedBlock,
     NoInodes,
+    NotDirectory,
+    NameExists,
+    NoMoreBlocks,
 }
 
 impl fmt::Display for FileError {
@@ -18,6 +21,9 @@ impl fmt::Display for FileError {
             FileError::CorruptedINode=>"Corrupted INode",
             FileError::CorruptedBlock=>"Corrupted block",
             FileError::NoInodes=>"Out of inodes",
+            FileError::NotDirectory=>"No such directory",
+            FileError::NameExists=>"Entity with that name exists",
+            FileError::NoMoreBlocks=>"Out of blocks",
         };
 
         write!(f, "{message}")

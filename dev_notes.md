@@ -109,23 +109,92 @@ inode with the uid, gid, mode and time and also zeroes out other data and then r
 
 So now it is ready for a write methods thing. first directories to add files. Then file IO.
 
+# Extent tree function writeup
 
+I made it look pretty.
 
+Core types
 
+Extent { logical_start, physical_start, length } — a contiguous run of length physical blocks starting at physical_start, representing logical blocks [logical_start, logical_start+length) of a file/directory. repr(C, packed), 12 bytes on disk via to_bytes/from_bytes.
 
+IndexEntry { logical_start, child_block, _reserved } — same 12-byte footprint as Extent, used at non-leaf tree levels. logical_start is the minimum logical block covered by the subtree rooted at child_block.
 
+ExtentTreeNode { magic, depth, entry_count, max_entries, entries: Vec<[u8; 12]> } — a node in the tree. entries is untyped raw bytes; callers reinterpret each slot as Extent or IndexEntry depending on depth. depth == 0 means leaf (entries are extents); depth > 0 means internal (entries are index entries). This dual interpretation is the load-bearing trick that keeps one node type serving both roles.
 
+Reading
 
+ExtentTreeNode::read_node_with_block(disk, block_num) -> (Block, Self) — reads one external node off disk, validates magic == TREE_MAGIC and entry_count <= max_entries <= BLOCK_MAX_ENTRIES, returns both the raw Block (for later rewriting in place) and the parsed node. Used whenever a caller needs to mutate-then-rewrite the same block (insert/delete paths).
 
+ExtentTreeNode::read_node(disk, block_num) -> Self — same, discarding the Block. Used for pure reads (traversal, lookup) that never write back.
 
+range_lookup(disk, node, start, end) -> Vec<Extent> — public entry point for querying a logical range [start, end). Delegates to collect_range.
 
+collect_range(disk, node, start, end, out) — recursive traversal:
 
+Leaf: linear scan of the node's own entries, keeping any extent whose logical range overlaps [start, end).
+Internal: finds the first child that could contain start (find_child), then walks forward through sibling index entries, recursing into each child whose key is < end, breaking early once a child's key reaches end (pure pruning — doesn't affect correctness, just avoids visiting children guaranteed not to overlap).
+Cost is bounded by nodes actually touched, not by the numeric width of [start, end) — a query with end = u32::MAX is a full traversal, not an unbounded scan, since the loop bounds are entries.len(), not end - start.
 
+lookup_extent(disk, node, logical) -> Option<Extent> — point lookup for one logical block: leaf does a linear find, internal descends into exactly one child via find_child. O(depth), not O(fanout) per level like collect_range.
 
+find_child(node, logical_start) -> usize — shared descent primitive: finds the rightmost index entry whose logical_start <= logical_start, i.e. the child subtree that should contain that logical address. Falls back to index 0 if nothing qualifies (defensive; shouldn't happen in a well-formed tree since the first child should always cover the minimum).
 
+Writing
 
+write_external_block(disk, block, ext_block) — serialises a node into the payload region of an already-loaded Block (after the 14-byte block header), stamps the block header (checksum + flag) via block.serialise(), and writes the whole block to disk in one call. This is the single write path every mutation (insert splits, delete merges/borrows) funnels through — no other function writes external blocks directly.
 
+insert_extent(disk, root, new_ext, alloc_block) -> Vec<Extent> — public insert entry point. Delegates to insert_into_node with node_block = None (signals "this is the inode-resident root, not an external block," which changes the effective max_entries used for split decisions — root uses ROOT_MAX_ENTRIES, external nodes use BLOCK_MAX_ENTRIES). On a root split, allocates a fresh block for the old root's contents (left_block), writes it, and rewrites root in place as a new depth+1 internal node with two children (old root's data, and the new split-off sibling). Returns any Extents displaced/overwritten by the insert (for the caller to hand to the block-bitmap "mark free" step) — insertion can shrink or split existing overlapping extents, and any physical range that's fully superseded gets reported here rather than silently leaked.
 
+insert_into_node (private) — recursive core. Leaf case delegates to insert_leaf. Internal case: descends to the correct child, recurses, then handles the child's result — either just updating the parent's key for that child (Done), or absorbing a new sibling index entry and possibly splitting itself if that pushes entry_count past its own max_entries (Split). Split point is a simple midpoint (indices.len() / 2) — not weighted by size or logical spread, so it's not necessarily an even split of address-space coverage.
 
+insert_leaf (private) — the actual extent-merging logic:
+
+Clips any existing extent(s) that overlap the new insert's logical range, pushing the overlapping physical portion into freed (so old block mappings that get overwritten don't leak — the caller's alloc_block/bitmap logic is expected to reclaim them).
+Attempts to merge the new extent with its immediate logical+physical neighbors (merges_with_prev/merges_with_next) — this only fires when both logical and physical contiguity hold, so it correctly avoids merging two extents that happen to be logically adjacent but physically scattered.
+If the resulting entry count still fits max_entries, done. Otherwise splits at the midpoint, writes the right half to a freshly allocated block, and returns Split up to the caller.
+Deleting
+
+delete_extent_range(disk, root, start, end, free_block) -> Vec<Extent> — public delete entry point, mirrors insert_extent's structure. After delete_from_node signals Underflow at the root, checks whether the root has collapsed to a single child — if so, and that child's contents fit within ROOT_MAX_ENTRIES, pulls the child's data up into the root in place and frees the now-empty child block. This is the tree-shrinking counterpart to insert's tree-growing split.
+
+delete_from_node (private) — recursive core, structurally parallel to insert_into_node. Leaf case delegates to delete_leaf. Internal case: descends, and on Underflow from the child, tries three rebalancing strategies in order — borrow from left sibling, borrow from right sibling, merge with a sibling (left preferred, right as fallback) — each checked against min_entries (half of BLOCK_MAX_ENTRIES, fixed regardless of whether the sibling is itself a root — a minor asymmetry worth noting, since the root's own min-entries threshold uses whatever max_entries was passed in, but sibling checks always use the block-level threshold).
+
+delete_leaf (private) — trims/splits existing extents against the delete range [start, end), pushing every excised physical sub-range into freed. Signals Underflow if what remains drops below min_entries(node.max_entries).
+
+min_entries(max_entries) -> u16 — flat max_entries / 2 floor threshold; same policy used for both root and external nodes, just parameterized by whichever max_entries is in scope.
+
+Architectural notes
+
+One node type, two interpretations. ExtentTreeNode.entries: Vec<[u8; 12]> is reinterpreted as Extent or IndexEntry based on depth, avoiding a second node type entirely — this is what let me drop repr(C, packed)-based fixed structs earlier and collapse inode-root vs. external-block nodes into one type.
+
+Two different max-entries regimes coexist in the same tree. Root (inode-resident) caps at ROOT_MAX_ENTRIES (15, budget-limited by INODE_SIZE); every external block caps at BLOCK_MAX_ENTRIES (339, budget-limited by BLOCK_SIZE minus block+node headers). Every function that needs a threshold branches on node_block.is_some() (or equivalent) to pick the right one — this is the main place a future refactor could silently break if a call site forgets the distinction.
+
+Freed-space bookkeeping is push-based, not derived. Neither insert nor delete computes "what became free" after the fact — both accumulate it incrementally into a freed: &mut Vec<Extent> as clipping happens, which the bitmap layer consumes separately. This keeps the tree logic decoupled from bitmap logic entirely (the tree never touches a bitmap directly), at the cost of every caller being responsible for actually applying freed — nothing enforces that today.
+
+No rebalancing on insert beyond simple midpoint splits — unlike some B+-tree implementations, there's no attempt to redistribute into a sibling before splitting, so a tree can end up with node occupancies as low as max_entries/2 + 1 immediately after a split. Given the fanout (339 at external nodes), this is unlikely to matter in practice.
+
+# Directories
+
+Directories are read in one go from a range lookup from 0 to u32 max. they're first read as an inode provided in a 
+usize to the function read_directory. Now, the i_mode of the inode is what is to be used as the flag to see both type
+and the directory or file status.
+
+In add_dirent, I'm reading dirents and then iterating over the whole dirents to check if such a name exists. If it
+does it returns an error. Anyways, after that it reserves an inode and adds it to dirents and then calls a function to
+write dirents. but that solves that. Maybe instead of write_dirents I should have write_dirent because otherwise, it'll
+write the whole thing all over again when I really just need to add an extent.
+Yeah so I got rid of write_dirent altogether. It's specific to add dirent so meh. Also inode number is expected to
+be less that u32::MAX. So I will be getting all extents of the directory inode and for each block in that I'll be
+checking if it has space for my new entry. if it does, write and break. No partial writes. Too much book keeping, not
+much of a payoff.
+if NONE of the blocks have space, I'll make a new extent and insert it. While this seems like it should be a whole
+function, directory is only appending like this once so nah. Maybe later I can make it a helper if needed.
+see it isn't possible for something to be all zeroes for an entry. so I just need to find a contiguous range of zeroes in a block. lol that's clever. solves my hole management too. see my entry format is name_size,name,inode. so it can't be 0 realistically. what's the max name size is 65k but obviously fucking not because the block is 4082 bytes with the header out. so I'll make the max length 255 bytes but here's the thing, I don't even need to check all 255. I just need to see if the first 2 bytes are 0 or not because name length can't be 0.
+
+this means with deletion I'd have to compact. That's important af. So essentially, name length can't be 0. lmfao that's
+smart af.
+
+Ok so adding a dirent itself it a mammoth task requiring me to later bring atomicity all over but also I'm getting
+fucked because there's so many layers to cross reference already. It has only been 100 ish lines of code but it has
+taken hours and is sooo complex. I have to mark blocks and used omfgggg.
 
 
