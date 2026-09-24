@@ -30,6 +30,9 @@ impl BlockHeader{
             _=>return Err(FileError::CorruptedBlock),
         };
         if crc32(&block[BLOCK_HEADER_SIZE..]) != checksum {
+            let calc=crc32(&block[BLOCK_HEADER_SIZE..]);
+            println!("{calc} != {checksum}");
+            println!("CHECKSUM");
             return Err(FileError::CorruptedBlock);
         }
         Ok(Self{lsn,
@@ -133,13 +136,9 @@ impl SuperBlock{
         };
         Ok(superblock)
     }
-
     pub fn serialise(&self) -> Vec<u8> {
         let mut block = vec![0u8; BLOCK_SIZE];
-        let mut offset: usize = 0;
-        let header = self.header.serialise();
-        block[offset..offset+BLOCK_HEADER_SIZE].copy_from_slice(&header);
-        offset += BLOCK_HEADER_SIZE;
+        let mut offset: usize = BLOCK_HEADER_SIZE;
         block[offset..offset+4].copy_from_slice(&self.magic.to_le_bytes());
         offset += 4;
         block[offset..offset+4].copy_from_slice(&self.version.to_le_bytes());
@@ -169,6 +168,16 @@ impl SuperBlock{
         block[offset..offset+1].copy_from_slice(&self.state.to_le_bytes());
         offset += 1;
         block[offset..offset+4].copy_from_slice(&self.root_inode.to_le_bytes());
+        let checksum = crc32(&block[BLOCK_HEADER_SIZE..]);
+        let flag_val: u16 = match self.header.flag {
+            Flag::Clean => 0,
+            Flag::Dirty => 1,
+            Flag::Recoverable => 2,
+            Flag::Irrecoverable => 3,
+        };
+        block[0..8].copy_from_slice(&self.header.lsn.to_le_bytes());
+        block[8..12].copy_from_slice(&checksum.to_le_bytes());
+        block[12..BLOCK_HEADER_SIZE].copy_from_slice(&flag_val.to_le_bytes());
         block
     }
 }

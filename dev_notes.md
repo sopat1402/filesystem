@@ -197,4 +197,7 @@ Ok so adding a dirent itself it a mammoth task requiring me to later bring atomi
 fucked because there's so many layers to cross reference already. It has only been 100 ish lines of code but it has
 taken hours and is sooo complex. I have to mark blocks and used omfgggg.
 
-
+Lol I forgot to make my disk have all the other block headers in there. Anyways, I made delete as a function but in 
+delete_dirent I'm going recursively if it is a dir but also, delete the function checks with name but it needs to clear
+the parent's stuff too. Which means finding where in its extents the name exists. but inserting a dirent works. I also
+made all the modes constants.

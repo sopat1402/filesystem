@@ -143,7 +143,7 @@ pub fn write_external_block(
     let end = BLOCK_HEADER_SIZE + serialised.len();
     block.buf[BLOCK_HEADER_SIZE..end].copy_from_slice(&serialised);
     block.serialise();
-    disk.write_at(&block.buf, (block.id * BLOCK_SIZE) as u64).map_err(|_| FileError::WriteError)?;
+    disk.write_all_at(&block.buf, (block.id * BLOCK_SIZE) as u64).map_err(|_| FileError::WriteError)?;
     Ok(())
 }
 
@@ -493,7 +493,7 @@ fn delete_from_node(
                 free_block(idx.child_block)?;
                 indices.remove(i);
             } else {
-                let (mut right_blk, right) = ExtentTreeNode::read_node_with_block(disk, indices[i + 1].child_block)?;
+                let (right_blk, right) = ExtentTreeNode::read_node_with_block(disk, indices[i + 1].child_block)?;
                 child.entries.extend(right.entries.iter().cloned());
                 child.entry_count = child.entries.len() as u16;
                 write_external_block(disk, &mut child_blk, &child)?;

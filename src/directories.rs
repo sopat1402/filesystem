@@ -1,7 +1,7 @@
 use crate::constants::*;
 use crate::file_errors::FileError;
 use crate::inode::{find_inode,write_inode};
-use crate::extent_tree::{range_lookup,insert_extent};
+use crate::extent_tree::{range_lookup,insert_extent,delete_extent_range};
 use crate::block::{Block,SuperBlock};
 use crate::filesystem::reserve_inode;
 use crate::bitmaps::*;
@@ -26,7 +26,7 @@ pub fn read_dir(disk:&File,inode_id:usize)->Result<Vec<(String,usize)>,FileError
                 break 'outer;
             }
             let block = Block::deserialise(disk, b as usize)?;
-            let payload = &block.buf[14..];
+            let payload = &block.buf[BLOCK_HEADER_SIZE..];
             let take = payload.len().min(remaining);
             dir_buf.extend_from_slice(&payload[..take]);
             remaining -= take;
@@ -80,7 +80,7 @@ pub fn add_dirent(disk:&File,directory_inode:usize,new_name:String,mode:u16,uid:
     'outer : for extent in extents{
         'inner : for b in extent.physical_start..extent.physical_start+extent.length{
             let block=Block::deserialise(disk,b as usize)?;
-            let mut offset=14usize;
+            let mut offset=BLOCK_HEADER_SIZE;
             loop{
                 let len=u16::from_le_bytes(block.buf[offset..offset+2]
                     .try_into()
@@ -125,8 +125,156 @@ pub fn add_dirent(disk:&File,directory_inode:usize,new_name:String,mode:u16,uid:
         new_block.write_block(disk)?;
     }
     let inode_buf=inode.serialise();
-    write_inode(disk,node,&inode_buf)?;
+    write_inode(disk, directory_inode, &inode_buf)?;
     let buf=superblock.serialise();
     disk.write_all_at(&buf,0).map_err(|_| FileError::WriteError)?;
     Ok(())
+}
+
+pub fn print_dir(disk:&File,inode_id:usize)->Result<(),FileError>{
+    let dirents=read_dir(disk,inode_id)?;
+    for (dirent,_) in dirents{
+        print!("{}\t",dirent);
+    }
+    println!();
+    Ok(())
+}
+
+pub fn delete_dirent(disk:&File,inode_id:usize)->Result<(),FileError>{
+    let mut node=find_inode(disk,inode_id)?;
+    let mut superblock=SuperBlock::deserialise(disk)?;
+    let mut inode_bitmap=Block::deserialise(disk,superblock.inode_bitmap_start as usize)?;
+    if is_dir(node.i_mode){
+        let dirents=read_dir(disk,inode_id)?;
+        for (_,id) in dirents{
+            delete_dirent(disk,id)?;
+            superblock = SuperBlock::deserialise(disk)?;
+        }
+        let extents=range_lookup(disk,&node.i_extents,0,u32::MAX)?;
+        for extent in extents{
+            'inner : for block_id in extent.physical_start..extent.physical_start+extent.length{
+                let mut block=Block::deserialise(disk,block_id as usize)?;
+                let buf=[0u8;BLOCK_SIZE-BLOCK_HEADER_SIZE];
+                block.buf[BLOCK_HEADER_SIZE..].copy_from_slice(&buf);
+                block.write_block(disk)?;
+                let mut block_bitmap=Block::deserialise(disk,superblock.block_bitmap_start as usize)?;
+                mark_block_free(&mut block_bitmap.buf[BLOCK_HEADER_SIZE..],block_id as usize);
+                block_bitmap.write_block(disk)?;
+                superblock.free_blocks+=1;
+                continue 'inner;
+            }
+        }
+        let freed = {
+            let mut free_block = |block_id: u32| -> Result<(), FileError> {
+                let mut block_bitmap =
+                    Block::deserialise(disk, superblock.block_bitmap_start as usize)?;
+                mark_block_free(
+                    &mut block_bitmap.buf[BLOCK_HEADER_SIZE..],
+                    block_id as usize
+                );
+                block_bitmap.write_block(disk)?;
+                superblock.free_blocks += 1;
+                Ok(())
+            };
+            delete_extent_range(
+                disk,
+                &mut node.i_extents,
+                0,
+                u32::MAX,
+                &mut free_block
+            )?
+        };
+        for extent in freed {
+            for block_id in extent.physical_start
+                ..extent.physical_start + extent.length
+            {
+                let mut block = Block::deserialise(disk, block_id as usize)?;
+                let buf = [0u8; BLOCK_SIZE - BLOCK_HEADER_SIZE];
+                block.buf[BLOCK_HEADER_SIZE..].copy_from_slice(&buf);
+                block.write_block(disk)?;
+                let mut block_bitmap =
+                    Block::deserialise(disk, superblock.block_bitmap_start as usize)?;
+                mark_block_free(
+                    &mut block_bitmap.buf[BLOCK_HEADER_SIZE..],
+                    block_id as usize
+                );
+                block_bitmap.write_block(disk)?;
+                superblock.free_blocks += 1;
+            }
+        }
+        mark_inode_free(&mut inode_bitmap.buf[BLOCK_HEADER_SIZE..],inode_id);
+        inode_bitmap.write_block(disk)?;
+        superblock.free_inodes+=1;
+        let buf=superblock.serialise();
+        disk.write_all_at(&buf,0).map_err(|_| FileError::WriteError)?;
+    }else{
+        let extents=range_lookup(disk,&node.i_extents,0,u32::MAX)?;
+        for extent in extents{
+            'inner : for block_id in extent.physical_start..extent.physical_start+extent.length{
+                let mut block=Block::deserialise(disk,block_id as usize)?;
+                let buf=[0u8;BLOCK_SIZE-BLOCK_HEADER_SIZE];
+                block.buf[BLOCK_HEADER_SIZE..].copy_from_slice(&buf);
+                block.write_block(disk)?;
+                let mut block_bitmap=Block::deserialise(disk,superblock.block_bitmap_start as usize)?;
+                mark_block_free(&mut block_bitmap.buf[BLOCK_HEADER_SIZE..],block_id as usize);
+                block_bitmap.write_block(disk)?;
+                superblock.free_blocks+=1;
+                continue 'inner;
+            }
+        }
+        let freed = {
+            let mut free_block = |block_id: u32| -> Result<(), FileError> {
+                let mut block_bitmap =
+                    Block::deserialise(disk, superblock.block_bitmap_start as usize)?;
+                mark_block_free(
+                    &mut block_bitmap.buf[BLOCK_HEADER_SIZE..],
+                    block_id as usize
+                );
+                block_bitmap.write_block(disk)?;
+                superblock.free_blocks += 1;
+                Ok(())
+            };
+            delete_extent_range(
+                disk,
+                &mut node.i_extents,
+                0,
+                u32::MAX,
+                &mut free_block
+            )?
+        };
+        for extent in freed {
+            for block_id in extent.physical_start
+                ..extent.physical_start + extent.length
+            {
+                let mut block = Block::deserialise(disk, block_id as usize)?;
+                let buf = [0u8; BLOCK_SIZE - BLOCK_HEADER_SIZE];
+                block.buf[BLOCK_HEADER_SIZE..].copy_from_slice(&buf);
+                block.write_block(disk)?;
+                let mut block_bitmap =
+                    Block::deserialise(disk, superblock.block_bitmap_start as usize)?;
+                mark_block_free(
+                    &mut block_bitmap.buf[BLOCK_HEADER_SIZE..],
+                    block_id as usize
+                );
+                block_bitmap.write_block(disk)?;
+                superblock.free_blocks += 1;
+            }
+        }
+        mark_inode_free(&mut inode_bitmap.buf[BLOCK_HEADER_SIZE..],inode_id);
+        inode_bitmap.write_block(disk)?;
+        superblock.free_inodes+=1;
+        let buf=superblock.serialise();
+        disk.write_all_at(&buf,0).map_err(|_| FileError::WriteError)?;
+    }
+    Ok(())
+}
+
+pub fn delete(disk:&File,parent_inode:usize,name:String)->Result<(),FileError>{
+    let res=read_dir(disk,parent_inode)?;
+    for (entry_name,inode) in res{
+        if entry_name==name{
+            return delete_dirent(disk,inode);
+        }
+    }
+    Err(FileError::NotDirectory)
 }
