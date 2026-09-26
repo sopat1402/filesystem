@@ -201,3 +201,15 @@ Lol I forgot to make my disk have all the other block headers in there. Anyways,
 delete_dirent I'm going recursively if it is a dir but also, delete the function checks with name but it needs to clear
 the parent's stuff too. Which means finding where in its extents the name exists. but inserting a dirent works. I also
 made all the modes constants.
+
+Holy shit the past week as been busy. Past 2 weeks. First midsems and then an invasive visit. Anyways, my reserve block
+was buggy so I made an allocate block and also add dirent was forgetting to flush a block before deserialising it!! So
+now delete should be working, I'll test it. It's tiring because I have to rebuild the disk on each corrupted because I
+do not have corruption recovery yet. Allocate block takes a superblock reference so doesn't change its free block. The
+caller does. It is basically to make a helper for the bitmap mess. This is coming together slowly. TBH the mess will
+be implementing something for all or even most of the POSIX APIs when I make my driver.
+K dirent deletion passed the test. Yay.
+
+I made a lexer for splitting a path into tokens. then to resolve a path there is a function that returns the inode
+number of the path or it gives a name not found error. Now, I am also making a make_dir function. That can't just be
+add dirent because I need . and .. as links.

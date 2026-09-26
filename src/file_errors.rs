@@ -11,6 +11,7 @@ pub enum FileError{
     NotDirectory,
     NameExists,
     NoMoreBlocks,
+    NameNotFound,
 }
 
 impl fmt::Display for FileError {
@@ -25,6 +26,7 @@ impl fmt::Display for FileError {
             FileError::NotDirectory=>"No such directory",
             FileError::NameExists=>"Entity with that name exists",
             FileError::NoMoreBlocks=>"Out of blocks",
+            FileError::NameNotFound=>"No such name found",
         };
 
         write!(f, "{message}")
