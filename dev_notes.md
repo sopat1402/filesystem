@@ -213,3 +213,25 @@ K dirent deletion passed the test. Yay.
 I made a lexer for splitting a path into tokens. then to resolve a path there is a function that returns the inode
 number of the path or it gives a name not found error. Now, I am also making a make_dir function. That can't just be
 add dirent because I need . and .. as links.
+
+That completes the namespace layer.
+
+# Files
+
+So, most editors read the whole file as a buffer, which is what I will implement first. Then, deletion and changes
+occur in memory. After that they atomically delete the old file and write one with the same name. Makes it easy for me
+and that is what actual systems do. The atomically part is a keyword ig. The temp file thing is none of my business
+over here. I just need to make rename, append, write and read. At that point I only need journalling, caching and
+multithreading. Journalling will be the real big thing with atomicity for all of it plus I'm doing semi ARIES like in
+my database.
+
+K so I made a file struct. It has an impl with open and read for now. Also, since this is a 50MiB disk, and also because
+my extent tree uses u32 for the logical start, the file size for now is limited to 4.29 gigabytes. When I scale up, I
+can look at extent_tree.rs. Until then, cry me a river, you can't have 4+GB files on a 50MiB disk.
+
+Ugh read is where this stuff stops being cute and wipes its makeup off to reveal a fat programmer. Binary search first
+to find the lower extent. Then have to find the higher extent based on length. Then, I have to read the extents, put
+them into a buffer and based on that I have to trim it as needed and then return it.
+fuck me. the fucking range lookup. why the fuck was I searching the whole thing and filtering it myself? Anyways, I used
+range lookup and massively cleaned up my code. Before I was doing 0 to u32::MAX without thinking about it and was then
+binary searching on it lmfao.

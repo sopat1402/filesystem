@@ -19,6 +19,7 @@ pub const INODE_MAP_START: usize = 3;
 pub const DATA_START: usize = INODE_MAP_START + INODE_TABLE_BLOCKS;
 pub const TOTAL_SIZE: usize = NUM_BLOCKS * BLOCK_SIZE;
 pub const ROOT_INODE_NUM: usize = 0;
+
 pub const S_IFDIR: u16 = 0o040000;
 pub const S_IFREG: u16 = 0o100000;
 pub const S_IFIFO: u16 = 0o010000;
@@ -35,3 +36,16 @@ pub const S_IXGRP: u16 = 0o010;
 pub const S_IROTH: u16 = 0o004;
 pub const S_IWOTH: u16 = 0o002;
 pub const S_IXOTH: u16 = 0o001;
+
+pub const O_RDONLY: u32 = 0b00;
+pub const O_WRONLY: u32 = 0b01;
+pub const O_RDWR:   u32 = 0b10;
+pub const O_ACCMODE: u32 = 0b11;
+
+pub const O_CREAT:     u32 = 1 << 2;
+pub const O_EXCL:      u32 = 1 << 3;
+pub const O_TRUNC:     u32 = 1 << 4;
+pub const O_APPEND:    u32 = 1 << 5;
+pub const O_DIRECTORY: u32 = 1 << 10;
+pub const O_NOFOLLOW:  u32 = 1 << 11;
+pub const O_LARGEFILE: u32 = 1 << 15;

@@ -7,3 +7,4 @@ pub mod bitmaps;
 pub mod extent_tree;
 pub mod constants;
 pub mod directories;
+pub mod files;
