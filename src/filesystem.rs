@@ -167,7 +167,10 @@ pub fn reserve_inode(disk : &File, mode : u16, uid : u16, gid : u16)->Result<usi
     let mut superblock=SuperBlock::deserialise(disk)?;
     let bitmap_block=superblock.inode_bitmap_start;
     let mut bitmap_block=Block::deserialise(disk,bitmap_block as usize)?;
-    let inode_id=find_free_inode(&bitmap_block.buf[BLOCK_HEADER_SIZE..]);
+    let inode_bitmap_len = (TOTAL_INODES + 7) / 8;
+    let inode_id=find_free_inode(
+        &bitmap_block.buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + inode_bitmap_len],
+    );
     let inode_id=match inode_id{
         Some(t)=>t,
         None=>return Err(FileError::NoInodes),
@@ -198,7 +201,3 @@ pub fn reserve_inode(disk : &File, mode : u16, uid : u16, gid : u16)->Result<usi
     disk.write_all_at(&buf,0).map_err(|_| FileError::WriteError)?;
     Ok(inode_id)
 }
-
-
-
-

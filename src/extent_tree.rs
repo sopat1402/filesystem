@@ -42,7 +42,7 @@ impl Extent {
             length: u32::from_le_bytes(b[8..12].try_into().unwrap()),
         }
     }
-    fn logical_end(&self) -> u32 { self.logical_start + self.length }
+    fn logical_end(&self) -> u32 { self.logical_start.saturating_add(self.length) }
 }
 
 #[repr(C, packed)]
@@ -153,6 +153,9 @@ pub fn range_lookup(
     start: u32,
     end: u32,
 ) -> Result<Vec<Extent>, FileError> {
+    if start >= end {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     collect_range(disk, node, start, end, &mut out)?;
     Ok(out)
@@ -401,6 +404,30 @@ pub fn lookup_extent(disk: &File, node: &ExtentTreeNode, logical: u32) -> Result
 
 fn min_entries(max_entries: u16) -> u16 { max_entries / 2 }
 
+fn collect_and_clear_tree(
+    disk: &File,
+    node: &mut ExtentTreeNode,
+    free_block: &mut impl FnMut(u32) -> Result<(), FileError>,
+    freed: &mut Vec<Extent>,
+) -> Result<(), FileError> {
+    if node.is_leaf() {
+        freed.extend(node.entries.iter().map(Extent::from_bytes));
+    } else {
+        let children: Vec<IndexEntry> =
+            node.entries.iter().map(IndexEntry::from_bytes).collect();
+        for child_index in children {
+            let mut child = ExtentTreeNode::read_node(disk, child_index.child_block)?;
+            collect_and_clear_tree(disk, &mut child, free_block, freed)?;
+            free_block(child_index.child_block)?;
+        }
+    }
+    node.depth = 0;
+    node.entry_count = 0;
+    node.max_entries = ROOT_MAX_ENTRIES as u16;
+    node.entries.clear();
+    Ok(())
+}
+
 fn delete_leaf(node: &mut ExtentTreeNode, start: u32, end: u32, freed: &mut Vec<Extent>) -> DeleteResult {
     let existing: Vec<Extent> = node.entries.iter().map(Extent::from_bytes).collect();
     let mut remaining: Vec<Extent> = Vec::with_capacity(existing.len() + 1);
@@ -516,6 +543,10 @@ pub fn delete_extent_range(
     free_block: &mut impl FnMut(u32) -> Result<(), FileError>,
 ) -> Result<Vec<Extent>, FileError> {
     let mut freed = Vec::new();
+    if start == 0 && end == u32::MAX {
+        collect_and_clear_tree(disk, root, free_block, &mut freed)?;
+        return Ok(freed);
+    }
     if let DeleteResult::Underflow = delete_from_node(disk, root, None, start, end, free_block, &mut freed)? {
         if !root.is_leaf() && root.entry_count == 1 {
             let only_child_block = root.get_index(0).child_block;

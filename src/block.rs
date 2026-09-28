@@ -20,6 +20,9 @@ pub struct BlockHeader{
 
 impl BlockHeader{
     pub fn deserialise(block:&[u8])->Result<Self,FileError>{
+        if block.len() < BLOCK_HEADER_SIZE {
+            return Err(FileError::CorruptedBlock);
+        }
         let lsn=u64::from_le_bytes(block[0..8].try_into().map_err(|_| FileError::CorruptedBlock)?);
         let checksum=u32::from_le_bytes(block[8..12].try_into().map_err(|_| FileError::CorruptedBlock)?);
         let flag=match u16::from_le_bytes(block[12..BLOCK_HEADER_SIZE].try_into().map_err(|_| FileError::CorruptedBlock)?){

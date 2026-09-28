@@ -24,6 +24,9 @@ pub struct Inode {
 
 impl Inode {
     pub fn deserialise(buf: &[u8]) -> Result<Self, FileError> {
+        if buf.len() < INODE_SIZE {
+            return Err(FileError::CorruptedINode);
+        }
         let mut offset: usize = 0;
 
         let i_mode = u16::from_le_bytes(buf[offset..offset+2].try_into().map_err(|_| FileError::CorruptedINode)?);
@@ -151,6 +154,9 @@ impl Inode {
 }
 
 pub fn find_inode(disk:&File,inode_id:usize)->Result<Inode,FileError>{
+    if inode_id >= TOTAL_INODES {
+        return Err(FileError::CorruptedINode);
+    }
     let block_id=INODE_MAP_START+inode_id/INODES_PER_BLOCK;
     let offset=BLOCK_HEADER_SIZE+(inode_id%INODES_PER_BLOCK)*INODE_SIZE;
     let block=Block::deserialise(disk,block_id)?;
@@ -159,6 +165,9 @@ pub fn find_inode(disk:&File,inode_id:usize)->Result<Inode,FileError>{
 }
 
 pub fn write_inode(disk:&File, inode_id:usize, buf:&[u8])->Result<(),FileError>{
+    if inode_id >= TOTAL_INODES || buf.len() != INODE_SIZE {
+        return Err(FileError::CorruptedINode);
+    }
     let block_id=INODE_MAP_START+inode_id/INODES_PER_BLOCK;
     let offset=BLOCK_HEADER_SIZE+(inode_id%INODES_PER_BLOCK)*INODE_SIZE;
     let mut block=Block::deserialise(disk,block_id)?;
