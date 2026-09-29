@@ -4,6 +4,7 @@ use crate::block::{Block};
 use crate::extent_tree::{ExtentTreeNode};
 use crate::constants::*;
 
+#[repr(C)]
 pub struct Inode {
     pub i_mode: u16,
     pub i_uid: u16,

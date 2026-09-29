@@ -12,6 +12,7 @@ pub enum Flag{
     Irrecoverable,
 }
 
+#[repr(C)]
 pub struct BlockHeader{
     pub lsn         :   u64,
     pub checksum    :   u32,

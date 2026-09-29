@@ -227,7 +227,7 @@ my database.
 
 K so I made a file struct. It has an impl with open and read for now. Also, since this is a 50MiB disk, and also because
 my extent tree uses u32 for the logical start, the file size for now is limited to 4.29 gigabytes. When I scale up, I
-can look at extent_tree.rs. Until then, cry me a river, you can't have 4+GB files on a 50MiB disk.
+can look at extent_tree.rs. Until then, cry me a river, you can't have 4+ GB files on a 50MiB disk.
 
 Ugh read is where this stuff stops being cute and wipes its makeup off to reveal a fat programmer. Binary search first
 to find the lower extent. Then have to find the higher extent based on length. Then, I have to read the extents, put
@@ -235,3 +235,24 @@ them into a buffer and based on that I have to trim it as needed and then return
 fuck me. the fucking range lookup. why the fuck was I searching the whole thing and filtering it myself? Anyways, I used
 range lookup and massively cleaned up my code. Before I was doing 0 to u32::MAX without thinking about it and was then
 binary searching on it lmfao.
+
+K so for write I did a massive sprint. But first I also made fseek and ftell. Straightforward. I then for write first
+wrote the append and file length==0 (inode.i_size) branches as that is writing at the end with a bit for tail writing.
+Then came overwrites. It was more interaction with my extent tree than I would have liked. After that I made a 
+Filesystem struct and it opens the file from a path and then returns itself and the File struct now uses it inside it
+during the process of opening of a file as a param in the function and in the rest it is stored in the struct using
+'a as a lifetime specifier.
+I did feel however the spark in the project diminished a bit so to bring it back I'll write a FUSE driver so that I can
+actually see this project doing something even though there's no block cache or journalling yet. Otherwise, I have built
+crazy amounts of infrastructure already but seen about fuck all for it up until at least the write function was done for
+a file. The directories part was motivating though.
+
+# FUSE
+
+fuser CAN GO FUCK ITSELF!!! I will not use an external dependency. Even if it means talking to hardware. I will either
+use libc or declare war on abstraction itself and write the syscall stubs from scratch.
+
+So I'll write using libc for now to talk to FUSE that's already in the kernel space but at a later point I'll write
+something in C to talk directly to the VFS and kernel space. Different project? Not really. But that'll come later.
+The fuse driver will let me keep it user space and test for easily. I'll also eventually refactor to variable sized
+disks because 50 MiB is fucking absurd.
