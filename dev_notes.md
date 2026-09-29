@@ -308,3 +308,16 @@ So there's about 10 bugs from a series of tests. At first they gave me the same 
 disk creation was using an obsolete and wrong ratio. it should have been using bytes per inode. I blame that on my
 browser. When I searched kernel.org that crap gave an AI summary. I went and disabled AI now. Absolute trash that pulls
 stuff out of its ass. Has no fucking clue what it is talking about but it has to meet a token requirement ig?
+
+# Bug Fixes
+
+3 of them are too tedious to do tonight so I'll do them tomorrow. Out of 10 I'll be doing 7 tonight itself. 2 left
+as of now. I realised that most of what I forgot was those tiny enforcing things, except in the extent tree things,
+where idfk what happened.
+1 of the 7 left now. That's the block write when 2 free blocks. The bug before this was for adding links. Add dirent
+wasn't adding links and reserve inode sets it to 0. Make dir though sets it to 2.
+Bug number one (the one left) was also tree related. It was asking for 2 blocks for some reason. I'll have to trace
+it when I'm rested. For today though, I have done a crazy amount and managed a full variable sized disk refactor
+with the only nugs being 3 tree related ones, which are natural given the size of that code there and 1 for 
+unimplemented credentials. The credentials thing will come after the whole tree stuff because that's an auth layer
+using uid, gid and groups.

@@ -115,13 +115,23 @@ pub fn delete_dirent(disk: &File, inode_id: u64) -> Result<(), FileError> {
 }
 
 pub fn delete(disk:&File, parent_inode:u64, name:String) -> Result<(), FileError> {
+    if name==String::from(".") || name==String::from(".."){
+        return Err(FileError::Unsupported);
+    }
     let mut res = read_dir(disk, parent_inode)?;
     let idx = res.iter().position(|(entry_name, _)| *entry_name == name)
         .ok_or(FileError::NameNotFound)?;
     let (_, child_inode) = res[idx];
+    let child = find_inode(disk, child_inode)?;
+    let child_is_dir = is_dir(child.i_mode);
     delete_dirent(disk, child_inode)?;
     res.remove(idx);
     write_dirents(disk, parent_inode, res)?;
+    if child_is_dir {
+        let mut parent = find_inode(disk, parent_inode)?;
+        parent.i_links_count -= 1;
+        write_inode(disk, parent_inode, &parent.serialise())?;
+    }
     Ok(())
 }
 
@@ -142,6 +152,9 @@ pub fn add_dirent(disk:&File,directory_inode:u64,new_name:String,mode:u16,uid:u1
     if new_name.len()==0{
         return Err(FileError::NameExists);
     }
+    if new_name.len()>255{
+        return Err(FileError::Overflow);
+    }
     let dirents=read_dir(disk,directory_inode)?;
     for (name,_) in &dirents{
         if *name==new_name{
@@ -149,6 +162,9 @@ pub fn add_dirent(disk:&File,directory_inode:u64,new_name:String,mode:u16,uid:u1
         }
     }
     let node=reserve_inode(disk,mode,uid,gid)?;
+    let mut new_inode=find_inode(disk,node)?;
+    new_inode.i_links_count=1;
+    write_inode(disk, node, &new_inode.serialise())?;
     let mut superblock=SuperBlock::deserialise(disk)?;
     let mut write_buf=vec![0u8;new_name.len()+10];
     write_buf[0..2].copy_from_slice(&(new_name.len() as u16).to_le_bytes());
@@ -253,6 +269,7 @@ pub fn write_dirents(disk:&File, directory_inode:u64, dirents:Vec<(String,u64)>)
         block.buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + chunk.len()].copy_from_slice(chunk);
         block.write_block(disk)?;
     }
+    node.i_blocks=chunks.len() as u64;
     write_inode(disk, directory_inode, &node.serialise())?;
     disk.write_all_at(&superblock.serialise(), 0).map_err(|_| FileError::WriteError)?;
     Ok(())
