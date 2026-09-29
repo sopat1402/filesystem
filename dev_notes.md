@@ -256,3 +256,42 @@ So I'll write using libc for now to talk to FUSE that's already in the kernel sp
 something in C to talk directly to the VFS and kernel space. Different project? Not really. But that'll come later.
 The fuse driver will let me keep it user space and test for easily. I'll also eventually refactor to variable sized
 disks because 50 MiB is fucking absurd.
+
+# Variable size disk refactor
+
+K so I first grouped the constants in constants.rs into those affected by a variable sized disk and those that are
+constant. This refactor will be in 2 steps : first I need to make the constants change and I'd have to have a function
+to extract the bitmap buffers to feed to block searches. Data start would also change. So that means instead of using
+constants, the superblock would have to be referred to. This is fine tbh because later with reader writer mutexes
+the reader thing for checking which blocks are concerned with the bitmaps and data and inode maps there won't really be
+a write operation unless there's an allocation. But inode search and stuff still needs to check and to know which blocks
+to check,it needs to work with the superblock's data. It's tempting to cache the superblock now itself but there will
+be a block cache later anyways.
+
+ugh my superblock disk format is changing. have to change total size to a u64 stored in there and block count
+from u16 to u64 too. That sets a ceiling of several EiB.
+
+Ok so I changed a whole bunch of fields to u32 and u64 where applicable. I updated the superblock's variable sizes and
+on disk representations but basically I have to one shot this or preserve my train of thought perfectly in notes like
+this. I also deleted the obsolete constants so that I get errors where they were used and the compiler itself tells me
+where the changes are needed.
+
+now, u64::MAX is 18,446,744,073,709,551,615. That's the max number of bytes the disk can have. That's 16 EiB or about
+18.4467 exabytes. I'll use EiB since 1024 is nice. So, the max number of blocks is 4,503,599,627,370,496 or about 4.5
+quadrillion. Well under u64::MAX. The inode ratio is provided on create disk but basically it too is less than
+u64::MAX, which is 2^64 - 1. I have to dynamically calculate the block and inode bitmap sizes.
+
+For x entries to either one, there's a 14 byte header in each block so 4082 bytes per block. Each byte can represent
+8 entries. so, x/8 + (x%8>0)*1 bytes needed. with the max blocks, that comes out to 137910326659 blocks!! So that
+is more than u32::MAX and it seems even the inode and block bitmap starts need to be u64 then. As well as the inode
+table map. K that is done. data start is u64 too.
+
+also, each inode is 256 bytes. With x inodes, that's 256*x bytes. So with 4082 bytes in each block, the number of
+blocks needed for the inode table is (256*x)/4082 + ((256*x)%4082)>0*1 blocks. By >0 , it is meant that 1 is true and
+0 is false.
+
+I have massive amount of rewriting to do. Create disk needs to now chunk the bitmap stuff block by block. Mark block
+and inode free/used in bitmaps.rs needs to now perhaps take the superblock and chunk it on its own. instead of that
+maybe just pass disk to it and let it deserialise the superblock on its own. it only need the total blocks/inodes and
+the bitmap starts anyways. that'd massively clean code up too. but disk creation first. then the obsolete algorithms
+to act on it.

@@ -22,9 +22,9 @@ pub enum DeleteResult {
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct Extent {
-    pub logical_start: u32,
-    pub physical_start: u32,
-    pub length: u32,
+    pub logical_start: u64,
+    pub physical_start: u64,
+    pub length: u64,
 }
 
 impl Extent {
@@ -37,35 +37,35 @@ impl Extent {
     }
     pub fn from_bytes(b: &[u8; ENTRY_SIZE]) -> Self {
         Self {
-            logical_start: u32::from_le_bytes(b[0..4].try_into().unwrap()),
-            physical_start: u32::from_le_bytes(b[4..8].try_into().unwrap()),
-            length: u32::from_le_bytes(b[8..12].try_into().unwrap()),
+            logical_start: u64::from_le_bytes(b[0..8].try_into().unwrap()),
+            physical_start: u64::from_le_bytes(b[8..16].try_into().unwrap()),
+            length: u64::from_le_bytes(b[16..24].try_into().unwrap()),
         }
     }
-    fn logical_end(&self) -> u32 { self.logical_start.saturating_add(self.length) }
+    fn logical_end(&self) -> u64 { self.logical_start.saturating_add(self.length) }
 }
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct IndexEntry {
-    pub logical_start: u32,
-    pub child_block: u32,
-    pub _reserved: u32,
+    pub logical_start: u64,
+    pub child_block: u64,
+    pub _reserved: u64,
 }
 
 impl IndexEntry {
     pub fn to_bytes(&self) -> [u8; ENTRY_SIZE] {
         let mut b = [0u8; ENTRY_SIZE];
-        b[0..4].copy_from_slice(&self.logical_start.to_le_bytes());
-        b[4..8].copy_from_slice(&self.child_block.to_le_bytes());
-        b[8..12].copy_from_slice(&self._reserved.to_le_bytes());
+        b[0..8].copy_from_slice(&self.logical_start.to_le_bytes());
+        b[8..16].copy_from_slice(&self.child_block.to_le_bytes());
+        b[16..24].copy_from_slice(&self._reserved.to_le_bytes());
         b
     }
     pub fn from_bytes(b: &[u8; ENTRY_SIZE]) -> Self {
         Self {
-            logical_start: u32::from_le_bytes(b[0..4].try_into().unwrap()),
-            child_block: u32::from_le_bytes(b[4..8].try_into().unwrap()),
-            _reserved: u32::from_le_bytes(b[8..12].try_into().unwrap()),
+            logical_start: u64::from_le_bytes(b[0..8].try_into().unwrap()),
+            child_block: u64::from_le_bytes(b[8..16].try_into().unwrap()),
+            _reserved: u64::from_le_bytes(b[14..24].try_into().unwrap()),
         }
     }
 }

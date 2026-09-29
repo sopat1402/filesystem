@@ -63,21 +63,22 @@ impl BlockHeader{
     }
 }
 
+#[repr(C)]
 pub struct SuperBlock{
     pub header                  :   BlockHeader,
     pub magic                   :   u32,
     pub version                 :   u32,
-    pub total_size              :   u32,
+    pub total_size              :   u64,
     pub block_size              :   u16,
     pub inode_size              :   u16,
-    pub block_count             :   u32,
-    pub inode_count             :   u32,
-    pub free_blocks             :   u32, //unallocated
-    pub free_inodes             :   u32, //unallocated
-    pub inode_bitmap_start      :   u16,
-    pub block_bitmap_start      :   u16,
-    pub inode_map_start         :   u16,
-    pub data_start              :   u16,
+    pub block_count             :   u64,
+    pub inode_count             :   u64,
+    pub free_blocks             :   u64, //unallocated
+    pub free_inodes             :   u64, //unallocated
+    pub inode_bitmap_start      :   u64,
+    pub block_bitmap_start      :   u64,
+    pub inode_map_start         :   u64,
+    pub data_start              :   u64,
     pub state                   :   u8, // 0-dirty, 1-clean
     pub root_inode              :   u32,
 }
@@ -95,28 +96,28 @@ impl SuperBlock{
         }
         let version=u32::from_le_bytes(block[offset..offset+4].try_into().map_err(|_| FileError::CorruptedBlock)?);
         offset+=4;
-        let total_size=u32::from_le_bytes(block[offset..offset+4].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        offset+=4;
+        let total_size=u64::from_le_bytes(block[offset..offset+8].try_into().map_err(|_| FileError::CorruptedBlock)?);
+        offset+=8;
         let block_size=u16::from_le_bytes(block[offset..offset+2].try_into().map_err(|_| FileError::CorruptedBlock)?);
         offset+=2;
         let inode_size=u16::from_le_bytes(block[offset..offset+2].try_into().map_err(|_| FileError::CorruptedBlock)?);
         offset+=2;
-        let block_count=u32::from_le_bytes(block[offset..offset+4].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        offset+=4;
-        let inode_count=u32::from_le_bytes(block[offset..offset+4].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        offset+=4;
-        let free_blocks=u32::from_le_bytes(block[offset..offset+4].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        offset+=4;
-        let free_inodes=u32::from_le_bytes(block[offset..offset+4].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        offset+=4;
-        let inode_bitmap_start=u16::from_le_bytes(block[offset..offset+2].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        offset+=2;
-        let block_bitmap_start=u16::from_le_bytes(block[offset..offset+2].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        offset+=2;
-        let inode_map_start=u16::from_le_bytes(block[offset..offset+2].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        offset+=2;
-        let data_start=u16::from_le_bytes(block[offset..offset+2].try_into().map_err(|_| FileError::CorruptedBlock)?);
-        offset+=2;
+        let block_count=u64::from_le_bytes(block[offset..offset+8].try_into().map_err(|_| FileError::CorruptedBlock)?);
+        offset+=8;
+        let inode_count=u64::from_le_bytes(block[offset..offset+8].try_into().map_err(|_| FileError::CorruptedBlock)?);
+        offset+=8;
+        let free_blocks=u64::from_le_bytes(block[offset..offset+8].try_into().map_err(|_| FileError::CorruptedBlock)?);
+        offset+=8;
+        let free_inodes=u64::from_le_bytes(block[offset..offset+8].try_into().map_err(|_| FileError::CorruptedBlock)?);
+        offset+=8;
+        let inode_bitmap_start=u64::from_le_bytes(block[offset..offset+8].try_into().map_err(|_| FileError::CorruptedBlock)?);
+        offset+=8;
+        let block_bitmap_start=u64::from_le_bytes(block[offset..offset+8].try_into().map_err(|_| FileError::CorruptedBlock)?);
+        offset+=8;
+        let inode_map_start=u64::from_le_bytes(block[offset..offset+8].try_into().map_err(|_| FileError::CorruptedBlock)?);
+        offset+=8;
+        let data_start=u64::from_le_bytes(block[offset..offset+8].try_into().map_err(|_| FileError::CorruptedBlock)?);
+        offset+=8;
         let state=u8::from_le_bytes(block[offset..offset+1].try_into().map_err(|_| FileError::CorruptedBlock)?);
         offset+=1;
         let root_inode=u32::from_le_bytes(block[offset..offset+4].try_into().map_err(|_| FileError::CorruptedBlock)?);
@@ -147,28 +148,28 @@ impl SuperBlock{
         offset += 4;
         block[offset..offset+4].copy_from_slice(&self.version.to_le_bytes());
         offset += 4;
-        block[offset..offset+4].copy_from_slice(&self.total_size.to_le_bytes());
-        offset += 4;
+        block[offset..offset+8].copy_from_slice(&self.total_size.to_le_bytes());
+        offset += 8;
         block[offset..offset+2].copy_from_slice(&self.block_size.to_le_bytes());
         offset += 2;
         block[offset..offset+2].copy_from_slice(&self.inode_size.to_le_bytes());
         offset += 2;
-        block[offset..offset+4].copy_from_slice(&self.block_count.to_le_bytes());
-        offset += 4;
-        block[offset..offset+4].copy_from_slice(&self.inode_count.to_le_bytes());
-        offset += 4;
-        block[offset..offset+4].copy_from_slice(&self.free_blocks.to_le_bytes());
-        offset += 4;
-        block[offset..offset+4].copy_from_slice(&self.free_inodes.to_le_bytes());
-        offset += 4;
-        block[offset..offset+2].copy_from_slice(&self.inode_bitmap_start.to_le_bytes());
-        offset += 2;
-        block[offset..offset+2].copy_from_slice(&self.block_bitmap_start.to_le_bytes());
-        offset += 2;
-        block[offset..offset+2].copy_from_slice(&self.inode_map_start.to_le_bytes());
-        offset += 2;
-        block[offset..offset+2].copy_from_slice(&self.data_start.to_le_bytes());
-        offset += 2;
+        block[offset..offset+8].copy_from_slice(&self.block_count.to_le_bytes());
+        offset += 8;
+        block[offset..offset+8].copy_from_slice(&self.inode_count.to_le_bytes());
+        offset += 8;
+        block[offset..offset+8].copy_from_slice(&self.free_blocks.to_le_bytes());
+        offset += 8;
+        block[offset..offset+8].copy_from_slice(&self.free_inodes.to_le_bytes());
+        offset += 8;
+        block[offset..offset+8].copy_from_slice(&self.inode_bitmap_start.to_le_bytes());
+        offset += 8;
+        block[offset..offset+8].copy_from_slice(&self.block_bitmap_start.to_le_bytes());
+        offset += 8;
+        block[offset..offset+8].copy_from_slice(&self.inode_map_start.to_le_bytes());
+        offset += 8;
+        block[offset..offset+8].copy_from_slice(&self.data_start.to_le_bytes());
+        offset += 8;
         block[offset..offset+1].copy_from_slice(&self.state.to_le_bytes());
         offset += 1;
         block[offset..offset+4].copy_from_slice(&self.root_inode.to_le_bytes());
@@ -187,7 +188,7 @@ impl SuperBlock{
 }
 
 pub struct Block{
-    pub id      :   usize,
+    pub id      :   u64,
     pub header  :   BlockHeader,
     pub buf     :   Vec<u8>,
 }
@@ -198,11 +199,11 @@ impl Block{
         let header_bytes=self.header.serialise();
         self.buf[0..BLOCK_HEADER_SIZE].copy_from_slice(&header_bytes);
     }
-    pub fn deserialise(disk:&File,id:usize)->Result<Self,FileError>{
+    pub fn deserialise(disk:&File,id:u64)->Result<Self,FileError>{
         if id==0{
             return Err(FileError::ReadError);
         }
-        let offset:u64=(id*BLOCK_SIZE) as u64;
+        let offset:u64=id*BLOCK_SIZE as u64;
         let mut buf=vec![0u8;BLOCK_SIZE];
         disk.read_at(&mut buf,offset).map_err(|_| FileError::ReadError)?;
         let header=BlockHeader::deserialise(&buf)?;
@@ -210,7 +211,7 @@ impl Block{
     }
     pub fn write_block(&mut self,disk:&File)->Result<(),FileError>{
         self.serialise();
-        let offset=self.id*BLOCK_SIZE;
+        let offset=self.id*BLOCK_SIZE as u64;
         disk.write_all_at(&self.buf,offset as u64).map_err(|_| FileError::WriteError)?;
         Ok(())
     }
