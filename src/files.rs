@@ -71,7 +71,13 @@ fn truncate_to_zero(disk: &std::fs::File, inode_id: u64) -> Result<(), FileError
 }
 
 impl<'a> File<'a> {
-    pub fn open(fs: &'a Filesystem, path: &String, cwd: u64, flags: u32) -> Result<Self, FileError> {
+
+    pub fn open(
+        fs: &'a Filesystem,
+        path: &String,
+        cwd: u64,
+        flags: u32,
+    ) -> Result<Self, FileError> {
         let access = flags & O_ACCMODE;
         if access == O_ACCMODE {
             return Err(FileError::InvalidFlags);
@@ -85,51 +91,89 @@ impl<'a> File<'a> {
 
         let disk = &fs.disk;
         let tokens = lexer(path);
-        if tokens.is_empty() {
-            return Err(FileError::NameNotFound);
-        }
-        let filename = tokens[tokens.len() - 1].clone();
-        let mut dir_inode = if path.starts_with('/') { ROOT_INODE_NUM as u64 } else { cwd };
-        for component in &tokens[..tokens.len() - 1] {
-            let dirents = read_dir(disk, dir_inode)?;
-            dir_inode = dirents
-                .iter()
-                .find(|(name, _)| name == component)
-                .map(|(_, inode)| *inode)
-                .ok_or(FileError::NameNotFound)?;
-        }
-        let dirents = read_dir(disk, dir_inode)?;
-        let existing = dirents
-            .iter()
-            .find(|(name, _)| *name == filename)
-            .map(|(_, id)| *id);
 
-        let file_inode = match existing {
-            Some(id) => {
-                if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
-                    return Err(FileError::NameExists);
-                }
-                let node = find_inode(disk, id)?;
-                let node_is_dir = is_dir(node.i_mode);
-                if flags & O_DIRECTORY != 0 && !node_is_dir {
-                    return Err(FileError::NotDirectory);
-                }
-                if node_is_dir && access != O_RDONLY {
-                    return Err(FileError::NotFile);
-                }
-                if flags & O_TRUNC != 0 && !node_is_dir {
-                    truncate_to_zero(disk, id)?;
-                }
-                id
+        let trailing_slash = path.ends_with('/')
+            && path
+                .chars()
+                .rev()
+                .skip(1)
+                .take_while(|c| *c == '\\')
+                .count()
+                % 2
+                == 0;
+
+        let (file_inode, already_exists) = if tokens.is_empty() {
+            if path.is_empty() || !path.starts_with('/') {
+                return Err(FileError::NameNotFound);
             }
-            None => {
-                if flags & O_CREAT == 0 {
-                    return Err(FileError::NameNotFound);
+            (ROOT_INODE_NUM as u64, true)
+        } else {
+            let filename = tokens[tokens.len() - 1].clone();
+            let mut dir_inode = if path.starts_with('/') {
+                ROOT_INODE_NUM as u64
+            } else {
+                cwd
+            };
+
+            for component in &tokens[..tokens.len() - 1] {
+                let dirents = read_dir(disk, dir_inode)?;
+                dir_inode = dirents
+                    .iter()
+                    .find(|(name, _)| name == component)
+                    .map(|(_, inode)| *inode)
+                    .ok_or(FileError::NameNotFound)?;
+            }
+
+            let dirents = read_dir(disk, dir_inode)?;
+            let existing = dirents
+                .iter()
+                .find(|(name, _)| *name == filename)
+                .map(|(_, id)| *id);
+
+            match existing {
+                Some(id) => (id, true),
+                None => {
+                    if trailing_slash {
+                        return Err(FileError::NotDirectory);
+                    }
+                    if flags & O_CREAT == 0 {
+                        return Err(FileError::NameNotFound);
+                    }
+                    (
+                        add_dirent(
+                            disk,
+                            dir_inode,
+                            filename,
+                            S_IFREG | 0o644,
+                            0,
+                            0,
+                        )?,
+                        false,
+                    )
                 }
-                add_dirent(disk, dir_inode, filename, S_IFREG | 0o644, 0, 0)?
             }
         };
-        Ok(Self { fs, inode: file_inode, offset: 0, flags })
+        if already_exists && flags & O_CREAT != 0 && flags & O_EXCL != 0 {
+            return Err(FileError::NameExists);
+        }
+        let node = find_inode(disk, file_inode)?;
+        let node_is_dir = is_dir(node.i_mode);
+
+        if (flags & O_DIRECTORY != 0 || trailing_slash) && !node_is_dir {
+            return Err(FileError::NotDirectory);
+        }
+        if node_is_dir && access != O_RDONLY {
+            return Err(FileError::NotFile);
+        }
+        if flags & O_TRUNC != 0 && !node_is_dir {
+            truncate_to_zero(disk, file_inode)?;
+        }
+        Ok(Self {
+            fs,
+            inode: file_inode,
+            offset: 0,
+            flags,
+        })
     }
 
     pub fn read(&mut self, length: usize) -> Result<Vec<u8>, FileError> {
