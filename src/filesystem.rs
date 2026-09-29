@@ -45,8 +45,8 @@ pub fn create_disk(path: &str, disk_size: u64, inode_ratio: u64) -> Result<(), F
     }
     let payload = (BLOCK_SIZE - BLOCK_HEADER_SIZE) as u64;
     let block_count = disk_size / bs;
-    let total_inodes = inode_ratio
-        .checked_mul(block_count)
+    let total_inodes = disk_size
+        .checked_div(inode_ratio)
         .filter(|&n| n > 0)
         .ok_or(FileError::NoInodes)?;
 

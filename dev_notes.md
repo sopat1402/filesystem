@@ -303,3 +303,8 @@ anyways, ironing out the kinks.
 Most of the bugs at this point are things that can only be fixed with a WAL i.e atomicity issues. Also fuck me IDK how
 but I kept spotting correctness bugs like in match arms in the extent tree. headache fr. the code blew up from about 600
 lines to almost 1300.
+
+So there's about 10 bugs from a series of tests. At first they gave me the same issue : no more blocks because the
+disk creation was using an obsolete and wrong ratio. it should have been using bytes per inode. I blame that on my
+browser. When I searched kernel.org that crap gave an AI summary. I went and disabled AI now. Absolute trash that pulls
+stuff out of its ass. Has no fucking clue what it is talking about but it has to meet a token requirement ig?
