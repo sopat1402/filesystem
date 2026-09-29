@@ -3,27 +3,20 @@ use crate::block::{SuperBlock,Block};
 use crate::constants::*;
 use crate::file_errors::FileError;
 
-pub fn find_free_inode(disk:&std::fs::File) -> Result<Option<u64>,FileError> {
-    let superblock=SuperBlock::deserialise(disk)?;
-    let mut inode_traversal_index=0u64;
-    for block_id in superblock.inode_bitmap_start..superblock.block_bitmap_start{
-        let block=Block::deserialise(disk,block_id)?;
-        let bitmap=block.buf[BLOCK_HEADER_SIZE..].to_vec();
-        for i in 0..bitmap.len() {
-            let byte = bitmap[i];
-            if byte == 0xFF {
-                inode_traversal_index+=8;
-                continue;
-            }
+pub fn find_free_inode(disk: &std::fs::File) -> Result<Option<u64>, FileError> {
+    let superblock = SuperBlock::deserialise(disk)?;
+    let mut idx = 0u64;
+    for block_id in superblock.inode_bitmap_start..superblock.block_bitmap_start {
+        let block = Block::deserialise(disk, block_id)?;
+        for &byte in &block.buf[BLOCK_HEADER_SIZE..] {
             for bit in 0..8 {
-                if byte & (1 << bit) == 0 {
-                    return Ok(Some(inode_traversal_index));
-                }else{
-                    inode_traversal_index+=1;
-                    if inode_traversal_index>=superblock.inode_count{
-                        return Ok(None);
-                    }
+                if idx >= superblock.inode_count {
+                    return Ok(None);
                 }
+                if byte & (1 << bit) == 0 {
+                    return Ok(Some(idx));
+                }
+                idx += 1;
             }
         }
     }
@@ -249,4 +242,17 @@ pub fn mark_inode_free(
     }
 
     Ok(())
+}
+
+pub fn allocate_block(disk: &std::fs::File, superblock: &mut SuperBlock) -> Result<u64, FileError> {
+    let new_extent = find_blocks(disk, 1)?;
+    if new_extent.is_empty() {
+        return Err(FileError::NoMoreBlocks);
+    }
+    mark_blocks_used(disk, &new_extent)?;
+    superblock.free_blocks = superblock
+        .free_blocks
+        .checked_sub(1)
+        .ok_or(FileError::NoMoreBlocks)?;
+    Ok(new_extent[0].physical_start)
 }

@@ -295,3 +295,11 @@ and inode free/used in bitmaps.rs needs to now perhaps take the superblock and c
 maybe just pass disk to it and let it deserialise the superblock on its own. it only need the total blocks/inodes and
 the bitmap starts anyways. that'd massively clean code up too. but disk creation first. then the obsolete algorithms
 to act on it.
+
+I spent a long time changing signatures and rewriting the bitmap functions. A few panics where i forgot a u32 in hiding
+on the test but the disk is successfully created. the inode ratio is bytes per inode. so total inodes is disk size/ratio
+anyways, ironing out the kinks.
+
+Most of the bugs at this point are things that can only be fixed with a WAL i.e atomicity issues. Also fuck me IDK how
+but I kept spotting correctness bugs like in match arms in the extent tree. headache fr. the code blew up from about 600
+lines to almost 1300.

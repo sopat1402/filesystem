@@ -14,6 +14,10 @@ pub enum FileError{
     NameNotFound,
     Overflow,
     NotFile,
+    MisalignedSize,
+    PermissionDenied,
+    InvalidFlags,
+    Unsupported,
 }
 
 impl fmt::Display for FileError {
@@ -31,6 +35,10 @@ impl fmt::Display for FileError {
             FileError::NameNotFound=>"No such name found",
             FileError::Overflow=>"Offset beyond file size",
             FileError::NotFile=>"Not a file",
+            FileError::MisalignedSize=>"Provided disk size is not block aligned",
+            FileError::PermissionDenied=>"Permission Denied",
+            FileError::InvalidFlags=>"Invalid file flags",
+            FileError::Unsupported=>"Unsupported operation",
         };
 
         write!(f, "{message}")
