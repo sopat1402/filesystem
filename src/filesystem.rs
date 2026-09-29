@@ -8,6 +8,19 @@ use std::time::{SystemTime,UNIX_EPOCH};
 use std::os::unix::prelude::FileExt;
 use crate::constants::*;
 
+pub struct Filesystem{
+    pub disk : std::fs::File,
+}
+
+impl Filesystem{
+    pub fn open(path:String)->Result<Self,FileError>{
+        let disk=std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(path).map_err(|_| FileError::ReadError)?;
+        Ok(Self{disk})
+    }
+}
 
 fn new_block(id: usize) -> Block {
     let mut header = BlockHeader { lsn: 0, checksum: 0, flag: Flag::Clean };

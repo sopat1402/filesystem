@@ -5,9 +5,11 @@ use crate::inode::{find_inode,write_inode};
 use crate::extent_tree::{insert_extent, lookup_extent, Extent};
 use crate::block::{Block,SuperBlock};
 use crate::bitmaps::{find_blocks,mark_blocks_used};
+use crate::filesystem::Filesystem;
 use std::os::unix::prelude::FileExt;
 
-pub struct File{
+pub struct File<'a>{
+    fs      :   &'a Filesystem,
     inode   :   usize,
     offset  :   u32,
     flags   :   u32,
@@ -34,9 +36,9 @@ fn allocate_block(disk: &std::fs::File, superblock: &mut SuperBlock) -> Result<u
     Ok(new_extent[0].physical_start)
 }
 
-
-impl File{
-    pub fn open(disk:&std::fs::File, path:&String, cwd:usize, flags:u32) -> Result<Self, FileError> {
+impl<'a> File<'a>{
+    pub fn open(fs:&'a Filesystem, path:&String, cwd:usize, flags:u32) -> Result<Self, FileError> {
+        let disk = &fs.disk;
         let tokens = lexer(path);
         if tokens.len() == 0 {
             return Err(FileError::NameNotFound);
@@ -72,10 +74,11 @@ impl File{
                 add_dirent(disk, dir_inode, filename, S_IFREG | 0o644, 0, 0)?
             }
         };
-        Ok(Self { inode: file_inode, offset: 0, flags })
+        Ok(Self { fs, inode: file_inode, offset: 0, flags })
     }
 
-    pub fn read(&mut self, disk:&std::fs::File, length:usize) -> Result<Vec<u8>, FileError> {
+    pub fn read(&mut self, length:usize) -> Result<Vec<u8>, FileError> {
+        let disk = &self.fs.disk;
         let inode = find_inode(disk, self.inode)?;
         if is_dir(inode.i_mode) {
             return Err(FileError::NotFile);
@@ -96,7 +99,7 @@ impl File{
                 if logical_block < start_block || logical_block >= end_block {
                     continue;
                 }
-                let block = crate::block::Block::deserialise(disk, block_num as usize)?;
+                let block = Block::deserialise(disk, block_num as usize)?;
                 buf.extend_from_slice(&block.buf[BLOCK_HEADER_SIZE..]);
             }
         }
@@ -110,16 +113,19 @@ impl File{
         self.offset
     }
 
-    pub fn fseek(&mut self,disk:&std::fs::File,pos:u32)->Result<(),FileError>{
-        let inode=find_inode(disk,self.inode)?;
-        if pos as u64>inode.i_size{
+    pub fn fseek(&mut self, pos:u32) -> Result<(), FileError> {
+        let disk = &self.fs.disk;
+        let inode = find_inode(disk, self.inode)?;
+        if pos as u64 > inode.i_size {
             return Err(FileError::Overflow);
         }
-        self.offset=pos;
+        self.offset = pos;
         Ok(())
     }
-    pub fn write(&mut self,disk:&std::fs::File,buf:&[u8],rel_offset:u32)->Result<usize,FileError>{
-        let mut inode=find_inode(disk,self.inode)?;
+
+    pub fn write(&mut self, buf:&[u8], rel_offset:u32) -> Result<usize, FileError> {
+        let disk = &self.fs.disk;
+        let mut inode = find_inode(disk, self.inode)?;
         if is_dir(inode.i_mode) {
             return Err(FileError::NotFile);
         }
