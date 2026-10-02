@@ -462,3 +462,7 @@ number. libc is really cool.
 
 FUCK my lookup is returning ENOENT for some reason. Ah fuck me my opcode map was wrong. 27 is open dir and 28 is read
 dir. Anyways, cd and ls are working now.
+
+Ok so following adding opcode 15 for reading a file, cat works and nvim cat work with that disk!!! I literally ran
+the driver, cd into the mounted disk, ls, cat, nested cd and then opened nvim and checked files. As write isn't done
+yet it isn't concrete but read only operations work.
