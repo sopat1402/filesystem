@@ -321,3 +321,38 @@ it when I'm rested. For today though, I have done a crazy amount and managed a f
 with the only nugs being 3 tree related ones, which are natural given the size of that code there and 1 for 
 unimplemented credentials. The credentials thing will come after the whole tree stuff because that's an auth layer
 using uid, gid and groups.
+
+New tests
+
+Extent tree:
+an insert spanning three leaves
+a delete spanning two leaves
+delete-all
+merge only when physically contiguous
+overwriting the middle of an extent
+a depth-2 tree with 1500 extents
+range delete on that depth-2 tree
+Permissions:
+owner, group and other class selection, including supplementary groups
+the root bypass
+a denied O_TRUNC leaving the file intact, which checks the ordering fix
+create needing write permission on the parent
+search permission on every path component
+File data:
+two files with interleaved writes, forcing a depth-1 tree and checking i_blocks
+a failed write on a full disk changing nothing
+no stale data after truncate and a sparse write
+a flipped byte reported as CorruptedBlock
+Bookkeeping:
+assert_accounting, a helper that compares the superblock free counts with the real bitmaps, used across the file
+create/write/delete cycles returning to baseline
+draining a 220-entry directory
+inode reuse with clean state
+inode exhaustion
+. and .. resolution
+
+K so currently only the directory_i_blocks_tracks_growth_through_add_dirent test is failing. Others pass.
+When add_dirent allocates a new directory block, it never increments i_blocks. Only write_dirents sets it. 
+The fix is to bump inode.i_blocks in the else branch, plus the tree blocks if insert_extent allocates any. But at this
+point, a massive chunk of crap is done. I can finally start with the driver once I fix that bug. I added credentials
+too with a kernel style check. So, I'm dreading the multithreading part lmao.

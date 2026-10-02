@@ -34,9 +34,6 @@ impl BlockHeader{
             _=>return Err(FileError::CorruptedBlock),
         };
         if crc32(&block[BLOCK_HEADER_SIZE..]) != checksum {
-            let calc=crc32(&block[BLOCK_HEADER_SIZE..]);
-            println!("{calc} != {checksum}");
-            println!("CHECKSUM");
             return Err(FileError::CorruptedBlock);
         }
         Ok(Self{lsn,

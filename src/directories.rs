@@ -203,8 +203,14 @@ pub fn add_dirent(disk:&File,directory_inode:u64,new_name:String,mode:u16,uid:u1
             physical_start:new_block_id,
             length:1,
         };
-        let mut alloc_block=|| allocate_block(disk,&mut superblock);
+        let mut tree_blocks=0u64;
+        let mut alloc_block=|| -> Result<u64,FileError> {
+            let b=allocate_block(disk,&mut superblock)?;
+            tree_blocks+=1;
+            Ok(b)
+        };
         insert_extent(disk,&mut inode.i_extents,new_extent,&mut alloc_block)?;
+        inode.i_blocks+=1+tree_blocks;
         let mut new_block=Block{
             id:new_block_id,
             header:crate::block::BlockHeader{lsn:0,checksum:0,flag:crate::block::Flag::Clean},
@@ -251,7 +257,7 @@ pub fn write_dirents(disk:&File, directory_inode:u64, dirents:Vec<(String,u64)>)
         chunks.push(cur);
     }
     node.i_size = total;
-
+    let mut tree_blocks=0u64;
     for (logical, chunk) in chunks.iter().enumerate() {
         let block_id = allocate_block(disk, &mut superblock)?;
         let new_extent = crate::extent_tree::Extent {
@@ -259,7 +265,11 @@ pub fn write_dirents(disk:&File, directory_inode:u64, dirents:Vec<(String,u64)>)
             physical_start: block_id,
             length: 1,
         };
-        let mut alloc_block = || allocate_block(disk, &mut superblock);
+        let mut alloc_block = || -> Result<u64, FileError> {
+            let b = allocate_block(disk, &mut superblock)?;
+            tree_blocks += 1;
+            Ok(b)
+        };
         insert_extent(disk, &mut node.i_extents, new_extent, &mut alloc_block)?;
         let mut block = Block {
             id: block_id,
@@ -269,7 +279,7 @@ pub fn write_dirents(disk:&File, directory_inode:u64, dirents:Vec<(String,u64)>)
         block.buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + chunk.len()].copy_from_slice(chunk);
         block.write_block(disk)?;
     }
-    node.i_blocks=chunks.len() as u64;
+    node.i_blocks=chunks.len() as u64 + tree_blocks;
     write_inode(disk, directory_inode, &node.serialise())?;
     disk.write_all_at(&superblock.serialise(), 0).map_err(|_| FileError::WriteError)?;
     Ok(())

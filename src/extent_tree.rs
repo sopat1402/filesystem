@@ -207,6 +207,27 @@ impl ExtentTreeNode {
     }
 }
 
+fn next_leaf_boundary(
+    disk: &File,
+    node: &ExtentTreeNode,
+    pos: u64,
+) -> Result<Option<u64>, FileError> {
+    if node.is_leaf() {
+        return Ok(None);
+    }
+    let i = find_child(node, pos)?;
+    let mut best = if i + 1 < node.entries.len() {
+        Some(node.get_index(i + 1).logical_start)
+    } else {
+        None
+    };
+    let child = ExtentTreeNode::read_node(disk, node.get_index(i).child_block)?;
+    if let Some(b) = next_leaf_boundary(disk, &child, pos)? {
+        best = Some(best.map_or(b, |x| x.min(b)));
+    }
+    Ok(best)
+}
+
 pub fn write_external_block(
     disk: &File,
     block: &mut Block,
@@ -323,30 +344,6 @@ fn find_child(
             })
             .unwrap_or(0)
     )
-}
-
-fn find_leaf_block(
-    disk: &File,
-    node: &ExtentTreeNode,
-    logical: u64,
-) -> Result<Option<u64>, FileError> {
-    if node.is_leaf() {
-        return Ok(None);
-    }
-
-    let i = find_child(node, logical)?;
-    let idx = node.get_index(i);
-
-    let child = ExtentTreeNode::read_node(
-        disk,
-        idx.child_block,
-    )?;
-
-    if child.is_leaf() {
-        Ok(Some(idx.child_block))
-    } else {
-        find_leaf_block(disk, &child, logical)
-    }
 }
 
 fn insert_into_node(
@@ -683,6 +680,32 @@ fn insert_leaf(
 }
 
 pub fn insert_extent(
+    disk: &File,
+    root: &mut ExtentTreeNode,
+    new_ext: Extent,
+    alloc_block: &mut impl FnMut() -> Result<u64, FileError>,
+) -> Result<Vec<Extent>, FileError> {
+    let end = new_ext.logical_start.checked_add(new_ext.length)
+        .ok_or(FileError::CorruptedBlock)?;
+    let mut freed = Vec::new();
+    let mut cur = new_ext.logical_start;
+    while cur < end {
+        let piece_end = match next_leaf_boundary(disk, root, cur)? {
+            Some(b) => b.min(end),
+            None => end,
+        };
+        let piece = Extent {
+            logical_start: cur,
+            physical_start: new_ext.physical_start + (cur - new_ext.logical_start),
+            length: piece_end - cur,
+        };
+        freed.extend(insert_extent_one(disk, root, piece, alloc_block)?);
+        cur = piece_end;
+    }
+    Ok(freed)
+}
+
+pub fn insert_extent_one(
     disk: &File,
     root: &mut ExtentTreeNode,
     new_ext: Extent,
@@ -1219,67 +1242,54 @@ pub fn delete_extent_range(
     }
     let mut freed = Vec::new();
     if start == 0 && end == u64::MAX {
-        collect_and_clear_tree(
-            disk,
-            root,
-            free_block,
-            &mut freed,
-        )?;
+        collect_and_clear_tree(disk, root, free_block, &mut freed)?;
         return Ok(freed);
     }
-    let overlapping = range_lookup(
-        disk,
-        root,
-        start,
-        end,
-    )?;
-    if overlapping.len() > 1 {
-        let first_leaf = find_leaf_block(
-            disk,
-            root,
-            overlapping[0].logical_start,
-        )?;
-        for extent in overlapping.iter().skip(1) {
-            let leaf = find_leaf_block(
+    let mut cur = start;
+    while cur < end {
+        if root.is_leaf() && root.entry_count == 0 {
+            break;
+        }
+        if !root.is_leaf() && root.entry_count == 0 {
+            break;
+        }
+        let piece_end = match next_leaf_boundary(disk, root, cur)? {
+            Some(b) if b > cur => b.min(end),
+            _ => end,
+        };
+        if !range_lookup(disk, root, cur, piece_end)?.is_empty() {
+            delete_from_node(
                 disk,
                 root,
-                extent.logical_start,
+                None,
+                cur,
+                piece_end,
+                free_block,
+                &mut freed,
             )?;
-            if leaf != first_leaf {
-                return Err(FileError::Unsupported);
-            }
         }
+        cur = piece_end;
     }
-    let result = delete_from_node(
-        disk,
-        root,
-        None,
-        start,
-        end,
-        free_block,
-        &mut freed,
-    )?;
-    if !root.is_leaf() && root.entry_count == 0 {
-        root.depth = 0;
-        root.entries.clear();
-        root.entry_count = 0;
-        root.max_entries = ROOT_MAX_ENTRIES as u16;
-    } else if let DeleteResult::Underflow = result {
-        if !root.is_leaf() && root.entry_count == 1 {
-            let only_child_block =
-                root.get_index(0).child_block;
-            let child = ExtentTreeNode::read_node(
-                disk,
-                only_child_block,
-            )?;
-            if child.entry_count as usize <= ROOT_MAX_ENTRIES {
-                root.depth = child.depth;
-                root.entries = child.entries;
-                root.entry_count = child.entry_count;
-                root.max_entries = ROOT_MAX_ENTRIES as u16;
-                free_block(only_child_block)?;
-            }
+    while !root.is_leaf() {
+        if root.entry_count == 0 {
+            root.depth = 0;
+            root.entries.clear();
+            root.max_entries = ROOT_MAX_ENTRIES as u16;
+            break;
         }
+        if root.entry_count != 1 {
+            break;
+        }
+        let only_child_block = root.get_index(0).child_block;
+        let child = ExtentTreeNode::read_node(disk, only_child_block)?;
+        if child.entry_count as usize > ROOT_MAX_ENTRIES {
+            break;
+        }
+        root.depth = child.depth;
+        root.entries = child.entries;
+        root.entry_count = child.entry_count;
+        root.max_entries = ROOT_MAX_ENTRIES as u16;
+        free_block(only_child_block)?;
     }
     Ok(freed)
 }
