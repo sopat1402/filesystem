@@ -24,16 +24,15 @@ fn now_secs() -> u64 {
 }
 
 pub struct Cred {
-    pub uid: u16,
-    pub gid: u16,
-    pub groups: Vec<u16>,
+    pub uid: u32,
+    pub gid: u32,
+    pub groups: Vec<u32>,
 }
 
 /// want: 4 = read, 2 = write, 1 = execute/search
 fn may_access(inode: &Inode, cred: &Cred, want: u16) -> bool {
     let mode = inode.i_mode;
     if cred.uid == 0 {
-        // root bypasses r/w; x needs a dir or at least one x bit
         return want & 1 == 0 || is_dir(mode) || mode & 0o111 != 0;
     }
     let bits = if cred.uid == inode.i_uid {
@@ -225,56 +224,6 @@ impl<'a> File<'a> {
         })
     }
 
-    pub fn read(&mut self, length: usize) -> Result<Vec<u8>, FileError> {
-        if self.flags & O_ACCMODE == O_WRONLY {
-            return Err(FileError::PermissionDenied);
-        }
-        let disk = &self.fs.disk;
-        let superblock = SuperBlock::deserialise(disk)?;
-        let mut inode = find_inode(disk, self.inode)?;
-        if is_dir(inode.i_mode) {
-            return Err(FileError::NotFile);
-        }
-        if inode.i_size > superblock.total_size {
-            return Err(FileError::CorruptedINode);
-        }
-        if self.offset >= inode.i_size || length == 0 {
-            return Ok(Vec::new());
-        }
-
-        let payload = (BLOCK_SIZE - BLOCK_HEADER_SIZE) as u64;
-        let end_offset = self.offset.saturating_add(length as u64).min(inode.i_size);
-        let read_len = (end_offset - self.offset) as usize;
-        let start_block = self.offset / payload;
-        let end_block = (end_offset - 1) / payload + 1; // exclusive, overflow-safe
-        let extents = range_lookup(disk, &inode.i_extents, start_block, end_block)?;
-
-        let mut result = vec![0u8; read_len];
-        for e in &extents {
-            let first = start_block.max(e.logical_start);
-            let last = end_block.min(e.logical_end());
-            for lb in first..last {
-                let pb = e
-                    .physical_start
-                    .checked_add(lb - e.logical_start)
-                    .ok_or(FileError::CorruptedINode)?;
-                let block = Block::deserialise(disk, pb)?;
-                let block_start = lb * payload; // lb < end_block, cannot overflow
-                let s = self.offset.max(block_start);
-                let en = end_offset.min(block_start.saturating_add(payload));
-                let dst = (s - self.offset) as usize..(en - self.offset) as usize;
-                let src = BLOCK_HEADER_SIZE + (s - block_start) as usize
-                    ..BLOCK_HEADER_SIZE + (en - block_start) as usize;
-                result[dst].copy_from_slice(&block.buf[src]);
-            }
-        }
-
-        self.offset = end_offset;
-        inode.i_atime = now_secs();
-        write_inode(disk, self.inode, &inode.serialise())?;
-        Ok(result)
-    }
-
     pub fn ftell(&self) -> u64 {
         self.offset
     }
@@ -303,7 +252,7 @@ impl<'a> File<'a> {
             return Err(FileError::CorruptedINode);
         }
         let base = if self.flags & O_APPEND != 0 { old_size } else { self.offset };
-        let end = base.checked_add(buf.len() as u64).ok_or(FileError::Overflow)?;
+        let end = base.checked_add(buf.len() as u64).ok_or(FileError::EOverflow)?;
         if end > superblock.total_size {
             return Err(FileError::NoMoreBlocks);
         }
@@ -430,4 +379,57 @@ impl<'a> File<'a> {
         self.offset = end;
         Ok(buf.len())
     }
+
+
+    pub fn read(&mut self, length: usize) -> Result<Vec<u8>, FileError> {
+        if self.flags & O_ACCMODE == O_WRONLY {
+            return Err(FileError::PermissionDenied);
+        }
+        let out = read_at(&self.fs.disk, self.inode, self.offset, length)?;
+        self.offset += out.len() as u64;
+        Ok(out)
+    }
 }
+    pub fn read_at(disk: &std::fs::File, inode_id: u64, offset: u64, length: usize) -> Result<Vec<u8>, FileError> {
+        let superblock = SuperBlock::deserialise(disk)?;
+        let mut inode = find_inode(disk, inode_id)?;
+        if is_dir(inode.i_mode) {
+            return Err(FileError::NotFile);
+        }
+        if inode.i_size > superblock.total_size {
+            return Err(FileError::CorruptedINode);
+        }
+        if offset >= inode.i_size || length == 0 {
+            return Ok(Vec::new());
+        }
+        let payload = (BLOCK_SIZE - BLOCK_HEADER_SIZE) as u64;
+        let end_offset = offset.saturating_add(length as u64).min(inode.i_size);
+        let read_len = (end_offset - offset) as usize;
+        let start_block = offset / payload;
+        let end_block = (end_offset - 1) / payload + 1;
+        let extents = range_lookup(disk, &inode.i_extents, start_block, end_block)?;
+
+        let mut result = vec![0u8; read_len];
+        for e in &extents {
+            let first = start_block.max(e.logical_start);
+            let last = end_block.min(e.logical_end());
+            for lb in first..last {
+                let pb = e
+                    .physical_start
+                    .checked_add(lb - e.logical_start)
+                    .ok_or(FileError::CorruptedINode)?;
+                let block = Block::deserialise(disk, pb)?;
+                let block_start = lb * payload;
+                let s = offset.max(block_start);
+                let en = end_offset.min(block_start.saturating_add(payload));
+                let dst = (s - offset) as usize..(en - offset) as usize;
+                let src = BLOCK_HEADER_SIZE + (s - block_start) as usize
+                    ..BLOCK_HEADER_SIZE + (en - block_start) as usize;
+                result[dst].copy_from_slice(&block.buf[src]);
+            }
+        }
+        inode.i_atime = now_secs();
+        write_inode(disk, inode_id, &inode.serialise())?;
+        Ok(result)
+    }
+

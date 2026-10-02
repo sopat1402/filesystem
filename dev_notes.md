@@ -356,3 +356,109 @@ When add_dirent allocates a new directory block, it never increments i_blocks. O
 The fix is to bump inode.i_blocks in the else branch, plus the tree blocks if insert_extent allocates any. But at this
 point, a massive chunk of crap is done. I can finally start with the driver once I fix that bug. I added credentials
 too with a kernel style check. So, I'm dreading the multithreading part lmao.
+
+# Driver
+
+Gaps in the current API
+- Inode numbers: FUSE's root is nodeid 1 and ino 0 is invalid, but my root is 0. I'll add 1 on the way out and 
+    subtract 1 on the way in, at the driver boundary only.
+- File is path-based and holds &Filesystem. FUSE is inode-based with explicit offsets. I'll pull the bodies of read
+    and write out into read_at(inode, offset, len) and write_at(inode, offset, buf, append). Keep a driver-owned fh 
+    -> (inode, flags) table instead of storing File<'a> values, which would be a self-referential mess.
+- Attributes: I need a function that returns an inode's attributes. FUSE blocks counts 512-byte units, 
+    so multiply the i_blocks by 8. Take uid and gid from the request header on CREATE and MKDIR.
+- rmdir and unlink: My delete is recursive. If I map rmdir straight onto it, rmdir on a non-empty directory 
+    destroys the contents. Check ENOTEMPTY for rmdir and EISDIR for unlink before calling it.
+- SETATTR: Editors use ftruncate, and I only have truncate_to_zero. I need truncate to an arbitrary size, 
+    which both shrinks and extends, plus chmod, chown and utimens.
+- readdir: FUSE passes an offset cookie. Using the index into read_dir vec works. Each fuse_dirent is padded to 8 bytes,
+    and the type comes from mode >> 12.
+- Generation numbers: reserve_inode sets i_generation = 0. Make it increment on reuse, because the kernel pairs 
+    (nodeid, generation) to detect a recycled inode.
+- Error mapping: NameNotFound → ENOENT, NameExists → EEXIST, NotDirectory → ENOTDIR, NotFile → EISDIR, NoMoreBlocks 
+    and NoInodes → ENOSPC, PermissionDenied → EACCES, InvalidFlags → EINVAL, Overflow → ENAMETOOLONG for names, 
+    and the corruption and I/O variants → EIO
+
+I added a stat field. It uses raw inode number. Damn. Maybe I should have started with inode 1. But eh. I'll just
+make the driver layer increment it.The driver fills in the rest of fuse_attr itself: blksize = 4096, rdev = 0, 
+and the nanosecond fields as 0, since I only store seconds. Also my uid and gid are u16 but u32 are accepted? Idk
+what to do about that. That'll mean changing the inode size. I'll look into it but I marked it here. Added lookup too.
+
+Ok so I first added more functions as an impl to Filesystem and then widened uid and gid to u32. Then, I added read_at
+and shortened File::read. Also changed errors. Overflow was overloaded so it is split into name too long and eoverflow.
+
+from /usr/include/linux/fuse.h
+
+struct fuse_in_header {
+	uint32_t	len;
+	uint32_t	opcode;
+	uint64_t	unique;
+	uint64_t	nodeid;
+	uint32_t	uid;
+	uint32_t	gid;
+	uint32_t	pid;
+	uint16_t	total_extlen; /* length of extensions in 8byte units */
+	uint16_t	padding;
+};
+
+struct fuse_out_header {
+	uint32_t	len;
+	int32_t		error;
+	uint64_t	unique;
+};
+
+I had to use fuse_init_in and fuse_init_out too. So when I first get a fuse fd, I read a 104 byte buffer from the kernel
+through the socket fd. 40 byte header. rest is fuse_init_in. My kernel is using 7.41 but I'll set fuse_init_out to
+negotiate 7.31 to not claim to support new features.
+
+262:struct fuse_attr {
+263-	uint64_t	ino;
+264-	uint64_t	size;
+265-	uint64_t	blocks;
+266-	uint64_t	atime;
+267-	uint64_t	mtime;
+268-	uint64_t	ctime;
+269-	uint32_t	atimensec;
+270-	uint32_t	mtimensec;
+271-	uint32_t	ctimensec;
+272-	uint32_t	mode;
+273-	uint32_t	nlink;
+274-	uint32_t	uid;
+275-	uint32_t	gid;
+276-	uint32_t	rdev;
+277-	uint32_t	blksize;
+278-	uint32_t	flags;
+279-};
+
+687-struct fuse_getattr_in {
+688-	uint32_t	getattr_flags;
+689-	uint32_t	dummy;
+690-	uint64_t	fh;
+691-};
+692-
+693-#define FUSE_COMPAT_ATTR_OUT_SIZE 96
+694-
+695:struct fuse_attr_out {
+696-	uint64_t	attr_valid;	/* Cache timeout for the attributes */
+697-	uint32_t	attr_valid_nsec;
+698-	uint32_t	dummy;
+699:	struct fuse_attr attr;
+700-};
+
+662:struct fuse_entry_out {
+663-	uint64_t	nodeid;		/* Inode ID */
+664-	uint64_t	generation;	/* Inode generation: nodeid:gen must
+665-					   be unique for the fs's lifetime */
+666-	uint64_t	entry_valid;	/* Cache timeout for the name */
+667-	uint64_t	attr_valid;	/* Cache timeout for the attributes */
+668-	uint32_t	entry_valid_nsec;
+669-	uint32_t	attr_valid_nsec;
+670-	struct fuse_attr attr;
+671-};
+
+These are structs from my linux's (Debian 13.5) fuse.h. the numbers there are line numbers. there will be mode. but
+anyways, I cleaned up the driver a lot. There's a main loop that dispatches a request, parses FileError to an error
+number. libc is really cool.
+
+FUCK my lookup is returning ENOENT for some reason. Ah fuck me my opcode map was wrong. 27 is open dir and 28 is read
+dir. Anyways, cd and ls are working now.

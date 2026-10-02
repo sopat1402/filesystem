@@ -1,6 +1,6 @@
 use crate::constants::*;
 use crate::file_errors::FileError;
-use crate::inode::{find_inode,write_inode};
+use crate::inode::{find_inode,write_inode,Stat,stat};
 use crate::extent_tree::{range_lookup,insert_extent,delete_extent_range};
 use crate::block::{Block,SuperBlock};
 use crate::filesystem::reserve_inode;
@@ -74,6 +74,15 @@ pub fn free_data_extents(
     Ok(())
 }
 
+pub fn lookup(disk: &File, parent: u64, name: &str) -> Result<Stat, FileError> {
+    let child = read_dir(disk, parent)?
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, id)| id)
+        .ok_or(FileError::NameNotFound)?;
+    stat(disk, child)
+}
+
 pub fn delete_dirent(disk: &File, inode_id: u64) -> Result<(), FileError> {
     let mut node = find_inode(disk, inode_id)?;
     let mut superblock = SuperBlock::deserialise(disk)?;
@@ -116,7 +125,7 @@ pub fn delete_dirent(disk: &File, inode_id: u64) -> Result<(), FileError> {
 
 pub fn delete(disk:&File, parent_inode:u64, name:String) -> Result<(), FileError> {
     if name==String::from(".") || name==String::from(".."){
-        return Err(FileError::Unsupported);
+        return Err(FileError::NameExists);
     }
     let mut res = read_dir(disk, parent_inode)?;
     let idx = res.iter().position(|(entry_name, _)| *entry_name == name)
@@ -148,12 +157,12 @@ fn allocate_block(disk: &File, superblock: &mut SuperBlock) -> Result<u64, FileE
     Ok(new_extent[0].physical_start)
 }
 
-pub fn add_dirent(disk:&File,directory_inode:u64,new_name:String,mode:u16,uid:u16,gid:u16)->Result<u64,FileError>{
+pub fn add_dirent(disk:&File,directory_inode:u64,new_name:String,mode:u16,uid:u32,gid:u32)->Result<u64,FileError>{
     if new_name.len()==0{
         return Err(FileError::NameExists);
     }
     if new_name.len()>255{
-        return Err(FileError::Overflow);
+        return Err(FileError::NameTooLong);
     }
     let dirents=read_dir(disk,directory_inode)?;
     for (name,_) in &dirents{
@@ -340,8 +349,8 @@ pub fn make_dir(
     disk:&File, 
     parent_inode:u64, 
     name:String, 
-    uid:u16, 
-    gid:u16,
+    uid:u32, 
+    gid:u32,
     permissions:u16) 
 -> Result<u64, FileError> {
     let new_id = add_dirent(disk, parent_inode, name, S_IFDIR | (permissions & 0o7777), uid, gid)?;

@@ -55,7 +55,7 @@ impl Drop for TestImage {
     }
 }
 
-fn cred(uid: u16, gid: u16) -> Cred {
+fn cred(uid: u32, gid: u32) -> Cred {
     Cred { uid, gid, groups: Vec::new() }
 }
 

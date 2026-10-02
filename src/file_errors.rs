@@ -12,12 +12,14 @@ pub enum FileError{
     NameExists,
     NoMoreBlocks,
     NameNotFound,
-    Overflow,
+    NameTooLong,
+    EOverflow,
     NotFile,
     MisalignedSize,
     PermissionDenied,
     InvalidFlags,
     Unsupported,
+    InvalidRequest,
 }
 
 impl fmt::Display for FileError {
@@ -33,12 +35,14 @@ impl fmt::Display for FileError {
             FileError::NameExists=>"Entity with that name exists",
             FileError::NoMoreBlocks=>"Out of blocks",
             FileError::NameNotFound=>"No such name found",
-            FileError::Overflow=>"Offset beyond file size",
+            FileError::EOverflow=>"Offset beyond file size",
+            FileError::NameTooLong=>"Name is too long",
             FileError::NotFile=>"Not a file",
             FileError::MisalignedSize=>"Provided disk size is not block aligned",
             FileError::PermissionDenied=>"Permission Denied",
             FileError::InvalidFlags=>"Invalid file flags",
             FileError::Unsupported=>"Unsupported operation",
+            FileError::InvalidRequest=>"Invalid request to fuse",
         };
 
         write!(f, "{message}")

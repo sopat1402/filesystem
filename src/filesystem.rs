@@ -1,4 +1,4 @@
-use crate::inode::Inode;
+use crate::inode::{Inode,Stat};
 use crate::extent_tree::{Extent, ExtentTreeNode};
 use crate::block::{SuperBlock, BlockHeader, Block, Flag};
 use crate::bitmaps::{mark_inode_used, find_free_inode};
@@ -13,6 +13,7 @@ pub struct Filesystem {
 }
 
 impl Filesystem {
+
     pub fn open(path: String) -> Result<Self, FileError> {
         let disk = std::fs::File::options()
             .read(true)
@@ -21,6 +22,23 @@ impl Filesystem {
             .map_err(|_| FileError::OpenError)?;
         Ok(Self { disk })
     }
+
+    pub fn stat(&self, ino: u64) -> Result<Stat, FileError> {
+        crate::inode::stat(&self.disk, ino)
+    }
+
+    pub fn lookup(&self, parent: u64, name: &str) -> Result<Stat, FileError> {
+        crate::directories::lookup(&self.disk, parent, name)
+    }
+
+    pub fn read_dir(&self, ino: u64) -> Result<Vec<(String, u64)>, FileError> {
+        crate::directories::read_dir(&self.disk, ino)
+    }
+
+    pub fn read_at(&self, ino: u64, offset: u64, len: usize) -> Result<Vec<u8>, FileError> {
+        crate::files::read_at(&self.disk, ino, offset, len)
+    }
+
 }
 
 fn new_block(id: u64) -> Block {
@@ -138,7 +156,7 @@ pub fn create_disk(path: &str, disk_size: u64, inode_ratio: u64) -> Result<(), F
         i_flags: 0,
         i_extents: ExtentTreeNode::empty_root(),
         i_generation: 0,
-        i_reserved: [0u8; 16],
+        i_reserved: [0u8; 12],
     };
     let empty_bytes = empty_inode.serialise();
 
@@ -165,7 +183,7 @@ pub fn create_disk(path: &str, disk_size: u64, inode_ratio: u64) -> Result<(), F
         i_flags: 0,
         i_extents: root_extents,
         i_generation: 0,
-        i_reserved: [0u8; 16],
+        i_reserved: [0u8; 12],
     };
     let root_bytes = root_inode.serialise();
 
@@ -196,7 +214,7 @@ pub fn create_disk(path: &str, disk_size: u64, inode_ratio: u64) -> Result<(), F
     Ok(())
 }
 
-pub fn reserve_inode(disk: &File, mode: u16, uid: u16, gid: u16) -> Result<u64, FileError> {
+pub fn reserve_inode(disk: &File, mode: u16, uid: u32, gid: u32) -> Result<u64, FileError> {
     let mut superblock = SuperBlock::deserialise(disk)?;
     let inode_id = find_free_inode(disk)?.ok_or(FileError::NoInodes)?;
     let mut inode = crate::inode::find_inode(disk, inode_id)?;
@@ -212,7 +230,7 @@ pub fn reserve_inode(disk: &File, mode: u16, uid: u16, gid: u16) -> Result<u64, 
     inode.i_mtime = now;
     inode.i_atime = now;
     inode.i_dtime = 0;
-    inode.i_reserved = [0u8; 16];
+    inode.i_reserved = [0u8; 12];
     inode.i_size = 0;
     inode.i_links_count = 0;
     crate::inode::write_inode(disk, inode_id, &inode.serialise())?;
