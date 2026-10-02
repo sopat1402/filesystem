@@ -493,4 +493,9 @@ int main(){
 
 It actually just ran code. It deleted a directory but since opcode 42 does not exist and needs no response but I didn't
 put it in there, it didn't work. The driver panicked. Now that I fixed it, it turns out that rmdir can delete even
-full directories. I'll look into it.
+full directories. I'll look into it. I imagined the BANZAI in Mr. Miyagi's voice. This disk will be pushed eventually
+as the first ever disk on this system that worked.
+
+I tried git init but that needs opcode 12 for renaming and oops I forgot to implement renaming a dirent.
+HOLY SHIT. I implemented rename. Opcodes 21, 22, 23, 24 for XATTR aren't there but I was able to make a git repo
+INSIDE MY FILESYSTEM, stage files and commit in there. mv works too.

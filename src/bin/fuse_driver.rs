@@ -1,9 +1,22 @@
 use filesystem::file_errors::FileError;
 use filesystem::filesystem::Filesystem;
-use filesystem::directories::delete;
+use filesystem::directories::{delete,make_dir,rename_dirent};
 use filesystem::inode::{find_inode,write_inode};
 use std::os::fd::RawFd;
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct FuseMkdirIn {
+    mode: u32,
+    umask: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FuseRenameIn {
+    newdir: u64,
+}
+const _: () = assert!(std::mem::size_of::<FuseRenameIn>() == 8);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -746,13 +759,97 @@ fn handle_delete(fs: &Filesystem,header:&FuseInHeader,body: &[u8])->Result<Vec<u
     Ok(Vec::new())
 }
 
+fn handle_makedir(fs: &Filesystem,header:&FuseInHeader,body: &[u8])->Result<Vec<u8>,FileError>{
+    let mkdir_in =unsafe { 
+        read_struct::<FuseMkdirIn>(body) 
+    }.ok_or(FileError::InvalidRequest)?;
+    let name_start = std::mem::size_of::<FuseMkdirIn>();
+    if body.len() <= name_start || body.last() != Some(&0) {
+        return Err(FileError::InvalidRequest);
+    }
+    let name_bytes = &body[name_start..body.len() - 1];
+    if name_bytes.is_empty() || name_bytes.contains(&0) || name_bytes.contains(&b'/') {
+        return Err(FileError::InvalidRequest);
+    }
+    let name = String::from_utf8(name_bytes.to_vec()).map_err(|_| FileError::InvalidRequest)?;
+    let parent_inode=header.nodeid.checked_sub(1).ok_or(FileError::InvalidFlags)?;
+    let permissions =((mkdir_in.mode & 0o7777) & !(mkdir_in.umask & 0o7777)) as u16;
+    let new_id = make_dir(
+        &fs.disk, parent_inode, name, header.uid, header.gid, permissions
+    )?;
+    let stat = fs.stat(new_id)?;
+    let entry_out = FuseEntryOut {
+        nodeid: stat.ino + 1,
+        generation: stat.generation as u64,
+        entry_valid: 1,
+        attr_valid: 1,
+        entry_valid_nsec: 0,
+        attr_valid_nsec: 0,
+        attr: FuseAttr {
+            ino: stat.ino + 1,
+            size: stat.size,
+            blocks: stat.blocks * 8,
+            atime: stat.atime,
+            mtime: stat.mtime,
+            ctime: stat.ctime,
+            atimensec: 0,
+            mtimensec: 0,
+            ctimensec: 0,
+            mode: stat.mode as u32,
+            nlink: stat.nlink as u32,
+            uid: stat.uid,
+            gid: stat.gid,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        },
+    };
+    Ok(as_bytes(&entry_out).to_vec())
+}
+
+fn handle_rename(fs:&Filesystem,header:&FuseInHeader,body: &[u8])->Result<Vec<u8>,FileError>{
+    let rename_in = unsafe { read_struct::<FuseRenameIn>(body) }
+        .ok_or(FileError::InvalidRequest)?;
+    let names_start = std::mem::size_of::<FuseRenameIn>();
+    let names = body.get(names_start..).ok_or(FileError::InvalidRequest)?;
+    let old_end = names.iter()
+        .position(|&b| b == 0)
+        .ok_or(FileError::InvalidRequest)?;
+    let new_start = old_end + 1;
+    let new_tail = names.get(new_start..).ok_or(FileError::InvalidRequest)?;
+    let new_len = new_tail.iter()
+        .position(|&b| b == 0)
+        .ok_or(FileError::InvalidRequest)?;
+    let new_end = new_start + new_len;
+    if old_end == 0 || new_len == 0 || new_end + 1 != names.len() {
+        return Err(FileError::InvalidRequest);
+    }
+    let old_bytes = &names[..old_end];
+    let new_bytes = &names[new_start..new_end];
+    if old_bytes.contains(&b'/') || new_bytes.contains(&b'/') {
+        return Err(FileError::InvalidRequest);
+    }
+    let old_name = String::from_utf8(old_bytes.to_vec())
+        .map_err(|_| FileError::InvalidRequest)?;
+    let new_name = String::from_utf8(new_bytes.to_vec())
+        .map_err(|_| FileError::InvalidRequest)?;
+    let old_parent = header.nodeid.checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
+    let new_parent = rename_in.newdir.checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
+    rename_dirent(&fs.disk, old_parent, old_name, new_parent, new_name)?;
+    Ok(Vec::new())
+}
+
 fn dispatch_request(fs: &Filesystem, header: &FuseInHeader, body: &[u8]) -> Result<Vec<u8>, FileError> {
     match header.opcode {
         1   => handle_lookup(fs, header, body),
         3   => handle_getattr(fs, header, body),
         4   => handle_setattr(fs,header,body),
+        9   => handle_makedir(fs,header,body),
         10  => handle_delete(fs,header,body),
         11  => handle_delete(fs,header,body),
+        12  => handle_rename(fs,header,body),
         14  => handle_open(fs,header,body),
         15  => handle_read(fs,header,body),
         16  => handle_write(fs,header,body),

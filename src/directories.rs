@@ -345,14 +345,7 @@ pub fn resolve_path(disk:&File,path:String,current:u64)->Result<u64,FileError>{
     Ok(id)
 }
 
-pub fn make_dir(
-    disk:&File, 
-    parent_inode:u64, 
-    name:String, 
-    uid:u32, 
-    gid:u32,
-    permissions:u16) 
--> Result<u64, FileError> {
+pub fn make_dir(disk:&File, parent_inode:u64, name:String, uid:u32, gid:u32,permissions:u16) -> Result<u64, FileError> {
     let new_id = add_dirent(disk, parent_inode, name, S_IFDIR | (permissions & 0o7777), uid, gid)?;
     let self_and_parent = vec![
         (".".to_string(), new_id),
@@ -366,4 +359,149 @@ pub fn make_dir(
     parent_node.i_links_count += 1;
     write_inode(disk, parent_inode, &parent_node.serialise())?;
     Ok(new_id)
+}
+
+pub fn rename_dirent(disk: &File,old_parent_inode: u64,old_name: String,new_parent_inode: u64,new_name: String) -> Result<(), FileError> {
+    if old_name.is_empty()
+        || new_name.is_empty()
+        || old_name.len() > 255
+        || new_name.len() > 255
+        || old_name.contains('/')
+        || new_name.contains('/')
+        || old_name.contains('\0')
+        || new_name.contains('\0')
+    {
+        return Err(FileError::InvalidRequest);
+    }
+    if old_name == "." || old_name == ".." || new_name == "." || new_name == ".." {
+        return Err(FileError::NameExists);
+    }
+    let same_parent = old_parent_inode == new_parent_inode;
+    let mut old_entries = read_dir(disk, old_parent_inode)?;
+    let source_index = old_entries
+        .iter()
+        .position(|(name, _)| name == &old_name)
+        .ok_or(FileError::NameNotFound)?;
+    let source_inode = old_entries[source_index].1;
+    if same_parent && old_name == new_name {
+        return Ok(());
+    }
+    let source = find_inode(disk, source_inode)?;
+    let source_is_dir = is_dir(source.i_mode);
+    let mut new_entries = if same_parent {
+        old_entries.clone()
+    } else {
+        read_dir(disk, new_parent_inode)?
+    };
+    let target_inode = new_entries
+        .iter()
+        .find(|(name, _)| name == &new_name)
+        .map(|(_, inode)| *inode);
+    let mut target_is_dir = false;
+    if let Some(target_id) = target_inode {
+        if target_id == source_inode {
+            return Ok(());
+        }
+        let target = find_inode(disk, target_id)?;
+        target_is_dir = is_dir(target.i_mode);
+
+        if source_is_dir && !target_is_dir {
+            return Err(FileError::NotDirectory);
+        }
+        if !source_is_dir && target_is_dir {
+            return Err(FileError::NotFile);
+        }
+        if target_is_dir {
+            let contents = read_dir(disk, target_id)?;
+            if contents
+                .iter()
+                .any(|(name, _)| name != "." && name != "..")
+            {
+                return Err(FileError::NameExists);
+            }
+        }
+    }
+    if source_is_dir && old_parent_inode != new_parent_inode {
+        let mut ancestor = new_parent_inode;
+        let mut seen = Vec::new();
+        loop {
+            if ancestor == source_inode {
+                return Err(FileError::InvalidRequest);
+            }
+            if seen.contains(&ancestor) {
+                return Err(FileError::CorruptedINode);
+            }
+            seen.push(ancestor);
+            let ancestor_entries = read_dir(disk, ancestor)?;
+            let parent_of_ancestor = ancestor_entries
+                .iter()
+                .find(|(name, _)| name == "..")
+                .map(|(_, inode)| *inode)
+                .ok_or(FileError::CorruptedBlock)?;
+
+            if parent_of_ancestor == ancestor {
+                break;
+            }
+            ancestor = parent_of_ancestor;
+        }
+    }
+    if let Some(target_id) = target_inode {
+        delete_dirent(disk, target_id)?;
+    }
+    old_entries.retain(|(name, _)| name != &old_name);
+    if same_parent {
+        old_entries.retain(|(name, _)| name != &new_name);
+        old_entries.push((new_name, source_inode));
+        write_dirents(disk, old_parent_inode, old_entries)?;
+    } else {
+        new_entries.retain(|(name, _)| name != &new_name);
+        new_entries.push((new_name, source_inode));
+        write_dirents(disk, old_parent_inode, old_entries)?;
+        write_dirents(disk, new_parent_inode, new_entries)?;
+        if source_is_dir {
+            let mut moved_entries = read_dir(disk, source_inode)?;
+            let dotdot = moved_entries
+                .iter_mut()
+                .find(|(name, _)| name == "..")
+                .ok_or(FileError::CorruptedBlock)?;
+            dotdot.1 = new_parent_inode;
+            write_dirents(disk, source_inode, moved_entries)?;
+        }
+    }
+    if same_parent {
+        if target_is_dir {
+            let mut parent = find_inode(disk, old_parent_inode)?;
+            parent.i_links_count = parent
+                .i_links_count
+                .checked_sub(1)
+                .ok_or(FileError::CorruptedINode)?;
+            write_inode(disk, old_parent_inode, &parent.serialise())?;
+        }
+    } else {
+        if source_is_dir {
+            let mut old_parent = find_inode(disk, old_parent_inode)?;
+            old_parent.i_links_count = old_parent
+                .i_links_count
+                .checked_sub(1)
+                .ok_or(FileError::CorruptedINode)?;
+            write_inode(disk, old_parent_inode, &old_parent.serialise())?;
+        }
+        if source_is_dir || target_is_dir {
+            let mut new_parent = find_inode(disk, new_parent_inode)?;
+            if target_is_dir {
+                new_parent.i_links_count = new_parent
+                    .i_links_count
+                    .checked_sub(1)
+                    .ok_or(FileError::CorruptedINode)?;
+            }
+            if source_is_dir {
+                new_parent.i_links_count = new_parent
+                    .i_links_count
+                    .checked_add(1)
+                    .ok_or(FileError::EOverflow)?;
+            }
+            write_inode(disk, new_parent_inode, &new_parent.serialise())?;
+        }
+    }
+    Ok(())
 }
