@@ -1,147 +1,153 @@
-// Builds a test image with known contents and writes an identical reference tree
-// to a host directory, so a mounted copy can be checked with `diff -r`.
-//
-// usage: cargo run --release --bin populate -- [image] [reference_dir] [uid] [gid]
-//        defaults: test.img expected 0 0
-
 use filesystem::constants::*;
 use filesystem::directories::{add_dirent, make_dir, resolve_path};
 use filesystem::file_errors::FileError;
 use filesystem::files::{Cred, File as FsFile};
 use filesystem::filesystem::{create_disk, Filesystem};
+use filesystem::inode::{find_inode, write_inode};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-
 const ROOT: u64 = ROOT_INODE_NUM as u64;
 const DISK_SIZE: u64 = 32 * 1024 * 1024;
 const INODE_RATIO: u64 = 16 * 1024;
 const PAYLOAD: usize = BLOCK_SIZE - BLOCK_HEADER_SIZE;
-
-/// Deterministic bytes. The period (251) doesn't divide the block payload (4082),
-/// so a wrong offset anywhere shows up as a mismatch instead of lining up by luck.
 fn pattern(len: usize, seed: u32) -> Vec<u8> {
     (0..len)
         .map(|i| ((i as u32).wrapping_mul(31).wrapping_add(seed) % 251) as u8)
         .collect()
 }
-
-fn root_cred() -> Cred {
-    Cred { uid: 0, gid: 0, groups: Vec::new() }
-}
-
-/// "/a/b/c" -> ("/a/b", "c"), "/c" -> ("/", "c")
 fn split(path: &str) -> (&str, &str) {
-    let (parent, name) = path.rsplit_once('/').expect("paths must be absolute");
+    let (parent, name) = path.rsplit_once('/').expect("absolute path required");
     (if parent.is_empty() { "/" } else { parent }, name)
 }
-
+fn set_root_owner(fs: &Filesystem, uid: u32, gid: u32) -> Result<(), FileError> {
+    let mut root = find_inode(&fs.disk, ROOT)?;
+    root.i_uid = uid;
+    root.i_gid = gid;
+    root.i_mode = S_IFDIR | 0o755;
+    write_inode(&fs.disk, ROOT, &root.serialise())
+}
 struct Ctx<'a> {
     fs: &'a Filesystem,
     out: &'a Path,
     uid: u32,
     gid: u32,
 }
-
 impl Ctx<'_> {
     fn host(&self, path: &str) -> PathBuf {
         self.out.join(path.trim_start_matches('/'))
     }
-
+    fn set_host_mode(&self, path: &str, mode: u16) {
+        std::fs::set_permissions(self.host(path), std::fs::Permissions::from_mode(mode as u32))
+            .expect("set reference permissions");
+    }
     fn parent_inode(&self, path: &str) -> Result<(u64, String), FileError> {
         let (parent, name) = split(path);
-        let inode = resolve_path(&self.fs.disk, parent.to_string(), ROOT)?;
-        Ok((inode, name.to_string()))
+        Ok((resolve_path(&self.fs.disk, parent.to_string(), ROOT)?, name.to_string()))
     }
-
-    fn mkdir(&self, path: &str, perm: u16) -> Result<(), FileError> {
+    fn mkdir(&self, path: &str, mode: u16) -> Result<(), FileError> {
         let (parent, name) = self.parent_inode(path)?;
-        make_dir(&self.fs.disk, parent, name, self.uid, self.gid, perm)?;
-        std::fs::create_dir_all(self.host(path)).expect("create reference dir");
+        make_dir(&self.fs.disk, parent, name, self.uid, self.gid, mode)?;
+        std::fs::create_dir_all(self.host(path)).expect("create reference directory");
+        self.set_host_mode(path, mode);
         Ok(())
     }
-
-    /// Create the dirent with the requested owner and mode, no data yet.
     fn create(&self, path: &str, mode: u16) -> Result<(), FileError> {
         let (parent, name) = self.parent_inode(path)?;
         add_dirent(&self.fs.disk, parent, name, S_IFREG | mode, self.uid, self.gid)?;
         Ok(())
     }
-
-    /// Data is written as root so the file's own mode (even 0o000) can't block us.
     fn open_for_write(&self, path: &str) -> Result<FsFile<'_>, FileError> {
-        FsFile::open(self.fs, &path.to_string(), ROOT, O_WRONLY, &root_cred())
+        let cred = Cred { uid: self.uid, gid: self.gid, groups: Vec::new() };
+        FsFile::open(self.fs, &path.to_string(), ROOT, O_WRONLY, &cred)
     }
-
     fn put(&self, path: &str, mode: u16, data: &[u8]) -> Result<(), FileError> {
         self.create(path, mode)?;
         if !data.is_empty() {
-            let mut f = self.open_for_write(path)?;
+            let mut file = self.open_for_write(path)?;
             for chunk in data.chunks(64 * 1024) {
-                assert_eq!(f.write(chunk)?, chunk.len(), "short write on {path}");
+                assert_eq!(file.write(chunk)?, chunk.len(), "short write on {path}");
             }
         }
         std::fs::write(self.host(path), data).expect("write reference file");
+        self.set_host_mode(path, mode);
         Ok(())
     }
-
-    /// A real hole: seek past EOF and write, so the gap has no blocks behind it.
     fn put_sparse(&self, path: &str, hole: usize, tail: &[u8]) -> Result<(), FileError> {
         self.create(path, 0o644)?;
-        let mut f = self.open_for_write(path)?;
-        f.fseek(hole as u64)?;
-        assert_eq!(f.write(tail)?, tail.len());
+        let mut file = self.open_for_write(path)?;
+        file.fseek(hole as u64)?;
+        assert_eq!(file.write(tail)?, tail.len());
         let mut reference = vec![0u8; hole];
         reference.extend_from_slice(tail);
-        std::fs::write(self.host(path), reference).expect("write reference file");
+        std::fs::write(self.host(path), reference).expect("write sparse reference file");
+        self.set_host_mode(path, 0o644);
         Ok(())
     }
 }
-
 fn main() -> Result<(), FileError> {
     let args: Vec<String> = std::env::args().collect();
-    let image = args.get(1).cloned().unwrap_or_else(|| "test.img".to_string());
-    let out = PathBuf::from(args.get(2).cloned().unwrap_or_else(|| "expected".to_string()));
-    let uid: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let gid: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-    let _ = std::fs::remove_file(&image);
-    let _ = std::fs::remove_dir_all(&out);
-    std::fs::create_dir_all(&out).expect("create reference dir");
-
+    let image = args.get(1).cloned().unwrap_or_else(|| "devfs.img".to_string());
+    let out = PathBuf::from(args.get(2).cloned().unwrap_or_else(|| "devfs-reference".to_string()));
+    let uid = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(unsafe { libc::getuid() });
+    let gid = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(unsafe { libc::getgid() });
+    if Path::new(&image).exists() || out.exists() {
+        return Err(FileError::NameExists);
+    }
+    std::fs::create_dir_all(&out).expect("create reference directory");
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755))
+        .expect("set reference root permissions");
     create_disk(&image, DISK_SIZE, INODE_RATIO)?;
     let fs = Filesystem::open(image.clone())?;
+    set_root_owner(&fs, uid, gid)?;
     let ctx = Ctx { fs: &fs, out: &out, uid, gid };
-
-    // Small and trivial files
-    ctx.put("/hello.txt", 0o644, b"hello from the filesystem\n")?;
-    ctx.put("/empty", 0o644, b"")?;
-    ctx.put("/secret.txt", 0o600, b"owner only\n")?;
-
-    // Block-boundary shapes: exactly one block, a few blocks plus a partial, and 1 MiB
-    ctx.put("/one-block.bin", 0o644, &pattern(PAYLOAD, 1))?;
-    ctx.put("/pattern.bin", 0o644, &pattern(3 * PAYLOAD + 123, 2))?;
-    ctx.put("/big.bin", 0o644, &pattern(1 << 20, 3))?;
-
-    // Hole spanning several unallocated blocks, then a few bytes
-    ctx.put_sparse("/sparse.bin", 3 * PAYLOAD + 10, b"tail")?;
-
-    // Awkward names
-    ctx.put("/naïve café.txt", 0o644, "unicode name\n".as_bytes())?;
-
-    // Nested directories
-    ctx.mkdir("/docs", 0o755)?;
-    ctx.put("/docs/readme.txt", 0o644, b"documentation lives here\n")?;
-    ctx.mkdir("/docs/nested", 0o755)?;
-    ctx.put("/docs/nested/deep.bin", 0o644, &pattern(2 * PAYLOAD, 4))?;
-
-    // 300 entries: the directory spills into a second block, which exercises
-    // READDIR paging and offsets
-    ctx.mkdir("/many", 0o755)?;
+    ctx.mkdir("/etc", 0o755)?;
+    ctx.mkdir("/tmp", 0o1777)?;
+    ctx.mkdir("/home", 0o755)?;
+    ctx.mkdir("/home/dev", 0o750)?;
+    ctx.mkdir("/home/dev/.config", 0o700)?;
+    ctx.mkdir("/home/dev/.config/fs-lab", 0o700)?;
+    ctx.mkdir("/home/dev/workspace", 0o750)?;
+    ctx.mkdir("/home/dev/workspace/src", 0o750)?;
+    ctx.mkdir("/home/dev/workspace/tests", 0o750)?;
+    ctx.mkdir("/home/dev/workspace/docs", 0o750)?;
+    ctx.mkdir("/home/dev/workspace/config", 0o750)?;
+    ctx.mkdir("/home/dev/workspace/data", 0o750)?;
+    ctx.mkdir("/home/dev/workspace/logs", 0o750)?;
+    ctx.mkdir("/var", 0o755)?;
+    ctx.mkdir("/var/log", 0o755)?;
+    ctx.mkdir("/var/lib", 0o755)?;
+    ctx.mkdir("/var/lib/fs-lab", 0o755)?;
+    ctx.mkdir("/var/lib/fs-lab/fixtures", 0o755)?;
+    ctx.mkdir("/var/lib/fs-lab/fixtures/many", 0o755)?;
+    ctx.put("/README.md", 0o644, b"Development filesystem image\n\nWritable workspace: /home/dev/workspace\nBoundary and directory fixtures: /var/lib/fs-lab/fixtures\nTemporary files: /tmp\n")?;
+    ctx.put("/etc/hostname", 0o644, b"fs-lab\n")?;
+    ctx.put("/etc/fs-lab.conf", 0o644, b"mountpoint = \"/mnt/fs-lab\"\nlog_level = \"info\"\n")?;
+    ctx.put("/home/dev/.config/fs-lab/config.toml", 0o600, b"mountpoint = \"/mnt/fs-lab\"\nlog_level = \"debug\"\n")?;
+    ctx.put("/home/dev/workspace/README.md", 0o644, b"# Filesystem Lab\n\nA small Rust workspace for experimenting with storage and FUSE.\n")?;
+    ctx.put("/home/dev/workspace/Cargo.toml", 0o644, b"[package]\nname = \"fs-playground\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n")?;
+    ctx.put("/home/dev/workspace/.gitignore", 0o644, b"/target\n*.img\n")?;
+    ctx.put("/home/dev/workspace/src/main.rs", 0o644, b"fn main() {\n    println!(\"filesystem lab ready\");\n}\n")?;
+    ctx.put("/home/dev/workspace/src/lib.rs", 0o644, b"pub fn describe_size(bytes: usize) -> String {\n    format!(\"{bytes} bytes\")\n}\n")?;
+    ctx.put("/home/dev/workspace/tests/roundtrip.rs", 0o644, b"#[test]\nfn empty_payload_has_zero_length() {\n    assert_eq!(Vec::<u8>::new().len(), 0);\n}\n")?;
+    ctx.put("/home/dev/workspace/docs/layout.md", 0o644, b"# Image layout\n\nThe image separates user workspace, configuration, logs, and filesystem test fixtures.\n")?;
+    ctx.put("/home/dev/workspace/config/fs-lab.toml", 0o640, b"[filesystem]\nblock_size = 4096\nread_only = false\n")?;
+    ctx.put("/home/dev/workspace/data/records.csv", 0o644, b"id,name,state\n1,alpha,ready\n2,beta,queued\n3,gamma,complete\n")?;
+    ctx.put("/home/dev/workspace/logs/session.log", 0o640, b"INFO mount initialized\nINFO root inode loaded\n")?;
+    ctx.put("/var/log/fs-lab.log", 0o640, b"INFO image opened\nINFO metadata checks passed\n")?;
+    ctx.put("/var/lib/fs-lab/fixtures/hello.txt", 0o644, b"hello from fs-lab\n")?;
+    ctx.put("/var/lib/fs-lab/fixtures/empty", 0o644, b"")?;
+    ctx.put("/var/lib/fs-lab/fixtures/private.txt", 0o600, b"owner-only fixture\n")?;
+    ctx.put("/var/lib/fs-lab/fixtures/one-block.bin", 0o644, &pattern(PAYLOAD, 1))?;
+    ctx.put("/var/lib/fs-lab/fixtures/cross-block.bin", 0o644, &pattern(3 * PAYLOAD + 123, 2))?;
+    ctx.put("/var/lib/fs-lab/fixtures/one-megabyte.bin", 0o644, &pattern(1 << 20, 3))?;
+    ctx.put_sparse("/var/lib/fs-lab/fixtures/sparse.bin", 3 * PAYLOAD + 10, b"tail")?;
+    ctx.put("/var/lib/fs-lab/fixtures/résumé.txt", 0o644, "unicode filename\n".as_bytes())?;
+    ctx.put(&format!("/var/lib/fs-lab/fixtures/{}", "x".repeat(255)), 0o644, b"255-byte filename\n")?;
     for i in 0..300 {
-        ctx.put(&format!("/many/f-{i:04}"), 0o644, b"")?;
+        ctx.put(&format!("/var/lib/fs-lab/fixtures/many/entry-{i:04}"), 0o644, b"")?;
     }
-
     println!("image: {image}");
     println!("reference tree: {}", out.display());
-    println!("owner of everything except / : uid {uid} gid {gid}");
+    println!("owner: uid {uid} gid {gid}");
     Ok(())
 }

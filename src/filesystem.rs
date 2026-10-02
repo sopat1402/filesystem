@@ -3,10 +3,10 @@ use crate::extent_tree::{Extent, ExtentTreeNode};
 use crate::block::{SuperBlock, BlockHeader, Block, Flag};
 use crate::bitmaps::{mark_inode_used, find_free_inode};
 use crate::file_errors::FileError;
-use std::fs::File;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::os::unix::prelude::FileExt;
 use crate::constants::*;
+use crate::files::File;
 
 pub struct Filesystem {
     pub disk: std::fs::File,
@@ -37,6 +37,16 @@ impl Filesystem {
 
     pub fn read_at(&self, ino: u64, offset: u64, len: usize) -> Result<Vec<u8>, FileError> {
         crate::files::read_at(&self.disk, ino, offset, len)
+    }
+
+    pub fn write_at(&self,inode: u64,offset: u64,buf: &[u8],) -> Result<usize, FileError> {
+        let mut file = File {
+            fs: self,
+            inode,
+            offset,
+            flags: O_WRONLY,
+        };
+        file.write(buf)
     }
 
 }
@@ -82,7 +92,7 @@ pub fn create_disk(path: &str, disk_size: u64, inode_ratio: u64) -> Result<(), F
         return Err(FileError::NoMoreBlocks);
     }
 
-    let disk = File::create(path).map_err(|_| FileError::WriteError)?;
+    let disk = std::fs::File::create(path).map_err(|_| FileError::WriteError)?;
     disk.set_len(disk_size).map_err(|_| FileError::WriteError)?;
 
     // Superblock
@@ -214,7 +224,7 @@ pub fn create_disk(path: &str, disk_size: u64, inode_ratio: u64) -> Result<(), F
     Ok(())
 }
 
-pub fn reserve_inode(disk: &File, mode: u16, uid: u32, gid: u32) -> Result<u64, FileError> {
+pub fn reserve_inode(disk: &std::fs::File, mode: u16, uid: u32, gid: u32) -> Result<u64, FileError> {
     let mut superblock = SuperBlock::deserialise(disk)?;
     let inode_id = find_free_inode(disk)?.ok_or(FileError::NoInodes)?;
     let mut inode = crate::inode::find_inode(disk, inode_id)?;

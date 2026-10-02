@@ -466,3 +466,31 @@ dir. Anyways, cd and ls are working now.
 Ok so following adding opcode 15 for reading a file, cat works and nvim cat work with that disk!!! I literally ran
 the driver, cd into the mounted disk, ls, cat, nested cd and then opened nvim and checked files. As write isn't done
 yet it isn't concrete but read only operations work.
+
+Waaah! I can't create files but can write them but the fucking premade disk is read only. I'll delete it and make a 
+blank one eventually. It'll be cool. So it's mostly just finding an opcode and writing it. But for some reason the
+protected file secrets.txt doesn't let me open it as SU either? in fact the whole fucking disk locks me out. It's 
+supposed to be the other way around. Did I just make an anarchist disk? No. I probably just shat something out when
+populating the disk. I'll look into it once I can make touch work (create file).
+
+One fucking thing after another. root was hard coded as a wrong value. hence the permission crap. but now I still
+can't write to a file because before opcode 16, it calls opcode 4 to set attr.
+
+ugh the fucking shell handles recursive delete. lol I gracefully implemented it with inodes and it turns out some 
+little shit's shell just does that. Anyways, now opcode 4 wasn't working for an hour because I was trying to do
+echo hi > test.txt, which was a stale inode from an old disk version that I couldn't delete. But I'm doing deletion
+now. Unlink, I should say. rmdir is next as opcode 11.
+
+OH FUCK NOW DELETION IS WORKING AND FUCKING LOOK AT WHAT I JUST DID THIS BEAUTIFUL CHILD OF MINE, MY FILESYSTEM RAN ITS FIRST C PROGRAM AND EXECUTED USING GCC!.
+
+#include <stdio.h>
+
+int main(){
+	printf("This is Sohum's first C code on this disk!!!\n");
+	printf("BANZAI !!!");
+	return 0;
+}
+
+It actually just ran code. It deleted a directory but since opcode 42 does not exist and needs no response but I didn't
+put it in there, it didn't work. The driver panicked. Now that I fixed it, it turns out that rmdir can delete even
+full directories. I'll look into it.

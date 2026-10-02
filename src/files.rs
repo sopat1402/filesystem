@@ -10,10 +10,10 @@ use std::os::unix::prelude::FileExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct File<'a> {
-    fs: &'a Filesystem,
-    inode: u64,
-    offset: u64,
-    flags: u32,
+    pub fs: &'a Filesystem,
+    pub inode: u64,
+    pub offset: u64,
+    pub flags: u32,
 }
 
 fn now_secs() -> u64 {
@@ -69,7 +69,7 @@ fn restore_blocks(disk: &std::fs::File, originals: &[(u64, Vec<u8>)]) {
     }
 }
 
-fn truncate_to_zero(disk: &std::fs::File, inode_id: u64) -> Result<(), FileError> {
+pub fn truncate_to_zero(disk: &std::fs::File, inode_id: u64) -> Result<(), FileError> {
     let mut inode = find_inode(disk, inode_id)?;
     let mut superblock = SuperBlock::deserialise(disk)?;
     let freed = {
@@ -390,46 +390,47 @@ impl<'a> File<'a> {
         Ok(out)
     }
 }
-    pub fn read_at(disk: &std::fs::File, inode_id: u64, offset: u64, length: usize) -> Result<Vec<u8>, FileError> {
-        let superblock = SuperBlock::deserialise(disk)?;
-        let mut inode = find_inode(disk, inode_id)?;
-        if is_dir(inode.i_mode) {
-            return Err(FileError::NotFile);
-        }
-        if inode.i_size > superblock.total_size {
-            return Err(FileError::CorruptedINode);
-        }
-        if offset >= inode.i_size || length == 0 {
-            return Ok(Vec::new());
-        }
-        let payload = (BLOCK_SIZE - BLOCK_HEADER_SIZE) as u64;
-        let end_offset = offset.saturating_add(length as u64).min(inode.i_size);
-        let read_len = (end_offset - offset) as usize;
-        let start_block = offset / payload;
-        let end_block = (end_offset - 1) / payload + 1;
-        let extents = range_lookup(disk, &inode.i_extents, start_block, end_block)?;
 
-        let mut result = vec![0u8; read_len];
-        for e in &extents {
-            let first = start_block.max(e.logical_start);
-            let last = end_block.min(e.logical_end());
-            for lb in first..last {
-                let pb = e
-                    .physical_start
-                    .checked_add(lb - e.logical_start)
-                    .ok_or(FileError::CorruptedINode)?;
-                let block = Block::deserialise(disk, pb)?;
-                let block_start = lb * payload;
-                let s = offset.max(block_start);
-                let en = end_offset.min(block_start.saturating_add(payload));
-                let dst = (s - offset) as usize..(en - offset) as usize;
-                let src = BLOCK_HEADER_SIZE + (s - block_start) as usize
-                    ..BLOCK_HEADER_SIZE + (en - block_start) as usize;
-                result[dst].copy_from_slice(&block.buf[src]);
-            }
-        }
-        inode.i_atime = now_secs();
-        write_inode(disk, inode_id, &inode.serialise())?;
-        Ok(result)
+pub fn read_at(disk: &std::fs::File, inode_id: u64, offset: u64, length: usize) -> Result<Vec<u8>, FileError> {
+    let superblock = SuperBlock::deserialise(disk)?;
+    let mut inode = find_inode(disk, inode_id)?;
+    if is_dir(inode.i_mode) {
+        return Err(FileError::NotFile);
     }
+    if inode.i_size > superblock.total_size {
+        return Err(FileError::CorruptedINode);
+    }
+    if offset >= inode.i_size || length == 0 {
+        return Ok(Vec::new());
+    }
+    let payload = (BLOCK_SIZE - BLOCK_HEADER_SIZE) as u64;
+    let end_offset = offset.saturating_add(length as u64).min(inode.i_size);
+    let read_len = (end_offset - offset) as usize;
+    let start_block = offset / payload;
+    let end_block = (end_offset - 1) / payload + 1;
+    let extents = range_lookup(disk, &inode.i_extents, start_block, end_block)?;
+
+    let mut result = vec![0u8; read_len];
+    for e in &extents {
+        let first = start_block.max(e.logical_start);
+        let last = end_block.min(e.logical_end());
+        for lb in first..last {
+            let pb = e
+                .physical_start
+                .checked_add(lb - e.logical_start)
+                .ok_or(FileError::CorruptedINode)?;
+            let block = Block::deserialise(disk, pb)?;
+            let block_start = lb * payload;
+            let s = offset.max(block_start);
+            let en = end_offset.min(block_start.saturating_add(payload));
+            let dst = (s - offset) as usize..(en - offset) as usize;
+            let src = BLOCK_HEADER_SIZE + (s - block_start) as usize
+                ..BLOCK_HEADER_SIZE + (en - block_start) as usize;
+            result[dst].copy_from_slice(&block.buf[src]);
+        }
+    }
+    inode.i_atime = now_secs();
+    write_inode(disk, inode_id, &inode.serialise())?;
+    Ok(result)
+}
 
