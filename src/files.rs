@@ -1,16 +1,17 @@
+use crate::block_cache::BlockCache;
+use crate::bitmaps::{
+    allocate_block, find_blocks, mark_block_free, mark_blocks_free, mark_blocks_used,
+};
 use crate::constants::*;
+use crate::directories::{add_dirent, free_data_extents, is_dir, lexer, read_dir};
+use crate::extent_tree::{delete_extent_range, insert_extent, range_lookup, Extent};
 use crate::file_errors::FileError;
-use crate::directories::{read_dir, lexer, add_dirent, is_dir, free_data_extents};
-use crate::inode::{Inode,find_inode, write_inode};
-use crate::extent_tree::{insert_extent, range_lookup, delete_extent_range, Extent};
-use crate::block::{Block, BlockHeader, Flag, SuperBlock};
-use crate::bitmaps::{allocate_block, find_blocks, mark_block_free, mark_blocks_free, mark_blocks_used};
 use crate::filesystem::Filesystem;
-use std::os::unix::prelude::FileExt;
+use crate::inode::{find_inode, write_inode, Inode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct File<'a> {
-    pub fs: &'a Filesystem,
+    pub fs: &'a mut Filesystem,
     pub inode: u64,
     pub offset: u64,
     pub flags: u32,
@@ -32,9 +33,11 @@ pub struct Cred {
 /// want: 4 = read, 2 = write, 1 = execute/search
 fn may_access(inode: &Inode, cred: &Cred, want: u16) -> bool {
     let mode = inode.i_mode;
+
     if cred.uid == 0 {
         return want & 1 == 0 || is_dir(mode) || mode & 0o111 != 0;
     }
+
     let bits = if cred.uid == inode.i_uid {
         (mode >> 6) & 7
     } else if cred.gid == inode.i_gid || cred.groups.contains(&inode.i_gid) {
@@ -42,70 +45,104 @@ fn may_access(inode: &Inode, cred: &Cred, want: u16) -> bool {
     } else {
         mode & 7
     };
+
     bits & want == want
 }
 
 fn physical_of(extents: &[Extent], lb: u64) -> Option<u64> {
     let idx = extents.partition_point(|e| e.logical_start <= lb);
+
     if idx == 0 {
         return None;
     }
-    let e = &extents[idx - 1];
-    if lb < e.logical_end() {
-        e.physical_start.checked_add(lb - e.logical_start)
+
+    let extent = &extents[idx - 1];
+
+    if lb < extent.logical_end() {
+        extent.physical_start.checked_add(lb - extent.logical_start)
     } else {
         None
     }
 }
 
-fn restore_blocks(disk: &std::fs::File, originals: &[(u64, Vec<u8>)]) {
-    for (id, buf) in originals {
-        let mut block = Block {
-            id: *id,
-            header: BlockHeader { lsn: 0, checksum: 0, flag: Flag::Clean },
-            buf: buf.clone(),
-        };
-        let _ = block.write_block(disk);
+fn restore_blocks(
+    block_cache: &mut BlockCache,
+    originals: &[(u64, Vec<u8>)],
+) -> Result<(), FileError> {
+    for (block_id, original) in originals {
+        let block = block_cache.get_mut(*block_id)?;
+        block.buf.copy_from_slice(original);
     }
+
+    Ok(())
 }
 
-pub fn truncate_to_zero(disk: &std::fs::File, inode_id: u64) -> Result<(), FileError> {
-    let mut inode = find_inode(disk, inode_id)?;
-    let mut superblock = SuperBlock::deserialise(disk)?;
+pub fn truncate_to_zero(
+    block_cache: &mut BlockCache,
+    inode_id: u64,
+) -> Result<(), FileError> {
+    let mut inode = find_inode(block_cache, inode_id)?;
+    let mut freed_tree_blocks = Vec::new();
+
     let freed = {
         let mut free_block = |block_id: u64| -> Result<(), FileError> {
-            mark_block_free(disk, block_id)?;
-            superblock.free_blocks += 1;
+            freed_tree_blocks.push(block_id);
             Ok(())
         };
-        delete_extent_range(disk, &mut inode.i_extents, 0, u64::MAX, &mut free_block)?
+
+        delete_extent_range(
+            block_cache,
+            &mut inode.i_extents,
+            0,
+            u64::MAX,
+            &mut free_block,
+        )?
     };
-    free_data_extents(disk, &mut superblock, &freed)?;
+
+    for block_id in &freed_tree_blocks {
+        mark_block_free(block_cache, *block_id)?;
+    }
+
+    if !freed_tree_blocks.is_empty() {
+        let superblock = block_cache.get_superblock_mut()?;
+        superblock.free_blocks += freed_tree_blocks.len() as u64;
+    }
+
+    free_data_extents(block_cache, &freed)?;
+
     let now = now_secs();
     inode.i_size = 0;
     inode.i_blocks = 0;
     inode.i_mtime = now;
     inode.i_ctime = now;
-    write_inode(disk, inode_id, &inode.serialise())?;
-    disk.write_all_at(&superblock.serialise(), 0)
-        .map_err(|_| FileError::WriteError)?;
+
+    write_inode(block_cache, inode_id, &inode.serialise())?;
     Ok(())
 }
 
 impl<'a> File<'a> {
-
-    pub fn open(fs: &'a Filesystem,path: &String,cwd: u64,flags: u32,cred: &Cred) -> Result<Self, FileError> {
+    pub fn open(
+        fs: &'a mut Filesystem,
+        path: &String,
+        cwd: u64,
+        flags: u32,
+        cred: &Cred,
+    ) -> Result<Self, FileError> {
         let access = flags & O_ACCMODE;
+
         if access == O_ACCMODE {
             return Err(FileError::InvalidFlags);
         }
+
         if flags & O_TRUNC != 0 && access == O_RDONLY {
             return Err(FileError::InvalidFlags);
         }
+
         if flags & O_CREAT != 0 && flags & O_DIRECTORY != 0 {
             return Err(FileError::InvalidFlags);
         }
-        let disk = &fs.disk;
+
+        let block_cache = &mut fs.block_cache;
         let tokens = lexer(path);
 
         let trailing_slash = path.ends_with('/')
@@ -117,64 +154,80 @@ impl<'a> File<'a> {
                 .count()
                 % 2
                 == 0;
+
         let (file_inode, already_exists) = if tokens.is_empty() {
             if path.is_empty() || !path.starts_with('/') {
                 return Err(FileError::NameNotFound);
             }
+
             (ROOT_INODE_NUM as u64, true)
         } else {
-            let filename = tokens[tokens.len() - 1].clone();
+            let filename = &tokens[tokens.len() - 1];
+
             let mut dir_inode = if path.starts_with('/') {
                 ROOT_INODE_NUM as u64
             } else {
                 cwd
             };
+
             for component in &tokens[..tokens.len() - 1] {
-                let dir = find_inode(disk, dir_inode)?;
+                let dir = find_inode(block_cache, dir_inode)?;
+
                 if !is_dir(dir.i_mode) {
                     return Err(FileError::NotDirectory);
                 }
+
                 if !may_access(&dir, cred, 1) {
                     return Err(FileError::PermissionDenied);
                 }
-                let dirents = read_dir(disk, dir_inode)?;
+
+                let dirents = read_dir(block_cache, dir_inode)?;
+
                 dir_inode = dirents
                     .iter()
                     .find(|(name, _)| name == component)
                     .map(|(_, inode)| *inode)
                     .ok_or(FileError::NameNotFound)?;
             }
-            let parent = find_inode(disk, dir_inode)?;
+
+            let parent = find_inode(block_cache, dir_inode)?;
+
             if !is_dir(parent.i_mode) {
                 return Err(FileError::NotDirectory);
             }
+
             if !may_access(&parent, cred, 1) {
                 return Err(FileError::PermissionDenied);
             }
 
-            let dirents = read_dir(disk, dir_inode)?;
+            let dirents = read_dir(block_cache, dir_inode)?;
+
             let existing = dirents
                 .iter()
-                .find(|(name, _)| *name == filename)
+                .find(|(name, _)| name == filename)
                 .map(|(_, id)| *id);
 
             match existing {
                 Some(id) => (id, true),
+
                 None => {
                     if trailing_slash {
                         return Err(FileError::NotDirectory);
                     }
+
                     if flags & O_CREAT == 0 {
                         return Err(FileError::NameNotFound);
                     }
+
                     if !may_access(&parent, cred, 3) {
                         return Err(FileError::PermissionDenied);
                     }
+
                     (
                         add_dirent(
-                            disk,
+                            block_cache,
                             dir_inode,
-                            filename,
+                            filename.clone(),
                             S_IFREG | 0o644,
                             cred.uid,
                             cred.gid,
@@ -189,31 +242,35 @@ impl<'a> File<'a> {
             return Err(FileError::NameExists);
         }
 
-        let node = find_inode(disk, file_inode)?;
+        let node = find_inode(block_cache, file_inode)?;
         let node_is_dir = is_dir(node.i_mode);
 
         if (flags & O_DIRECTORY != 0 || trailing_slash) && !node_is_dir {
             return Err(FileError::NotDirectory);
         }
+
         if node_is_dir && access != O_RDONLY {
             return Err(FileError::NotFile);
         }
+
         if already_exists {
-            let mut want: u16 = match access {
+            let mut want = match access {
                 O_RDONLY => 4,
                 O_WRONLY => 2,
                 _ => 6,
             };
+
             if flags & O_TRUNC != 0 {
                 want |= 2;
             }
+
             if !may_access(&node, cred, want) {
                 return Err(FileError::PermissionDenied);
             }
         }
 
         if flags & O_TRUNC != 0 && !node_is_dir {
-            truncate_to_zero(disk, file_inode)?;
+            truncate_to_zero(block_cache, file_inode)?;
         }
 
         Ok(Self {
@@ -237,200 +294,314 @@ impl<'a> File<'a> {
         if self.flags & O_ACCMODE == O_RDONLY {
             return Err(FileError::PermissionDenied);
         }
-        let disk = &self.fs.disk;
-        let mut inode = find_inode(disk, self.inode)?;
-        if is_dir(inode.i_mode) {
-            return Err(FileError::NotFile);
-        }
+
         if buf.is_empty() {
             return Ok(0);
         }
-        let mut superblock = SuperBlock::deserialise(disk)?;
+
+        let block_cache = &mut self.fs.block_cache;
+        let mut inode = find_inode(block_cache, self.inode)?;
+
+        if is_dir(inode.i_mode) {
+            return Err(FileError::NotFile);
+        }
+
         let payload = (BLOCK_SIZE - BLOCK_HEADER_SIZE) as u64;
         let old_size = inode.i_size;
-        if old_size > superblock.total_size {
+        let total_size = block_cache.get_superblock()?.total_size;
+
+        if old_size > total_size {
             return Err(FileError::CorruptedINode);
         }
-        let base = if self.flags & O_APPEND != 0 { old_size } else { self.offset };
-        let end = base.checked_add(buf.len() as u64).ok_or(FileError::EOverflow)?;
-        if end > superblock.total_size {
+
+        let base = if self.flags & O_APPEND != 0 {
+            old_size
+        } else {
+            self.offset
+        };
+
+        let end = base
+            .checked_add(buf.len() as u64)
+            .ok_or(FileError::EOverflow)?;
+
+        if end > total_size {
             return Err(FileError::NoMoreBlocks);
         }
+
         let write_begin = base.min(old_size);
         let first_block = write_begin / payload;
         let last_block = (end - 1) / payload;
-        let extents = range_lookup(disk, &inode.i_extents, first_block, last_block + 1)?;
-        let mut missing_blocks: Vec<u64> = Vec::new();
+
+        let extents = range_lookup(
+            block_cache,
+            &inode.i_extents,
+            first_block,
+            last_block + 1,
+        )?;
+
+        let mut missing_blocks = Vec::new();
+
         for lb in first_block..=last_block {
             if physical_of(&extents, lb).is_none() {
                 missing_blocks.push(lb);
             }
         }
+
         let missing = missing_blocks.len() as u64;
+
         let root_can_absorb = inode.i_extents.is_leaf()
-            && inode.i_extents.entry_count as usize + missing_blocks.len() <= ROOT_MAX_ENTRIES;
+            && inode.i_extents.entry_count as usize + missing_blocks.len()
+                <= ROOT_MAX_ENTRIES;
+
         let reserve = if root_can_absorb {
             0
         } else {
             missing.saturating_mul(inode.i_extents.depth as u64 + 2)
         };
-        if missing.saturating_add(reserve) > superblock.free_blocks {
+
+        let free_blocks = block_cache.get_superblock()?.free_blocks;
+
+        if missing.saturating_add(reserve) > free_blocks {
             return Err(FileError::NoMoreBlocks);
         }
-        let mut runs: Vec<Extent> = Vec::new();
-        let mut new_blocks: Vec<u64> = Vec::with_capacity(missing_blocks.len());
+
+        let mut runs = Vec::new();
+        let mut new_blocks = Vec::with_capacity(missing_blocks.len());
+
         if missing > 0 {
-            runs = find_blocks(disk, missing)?;
+            runs = find_blocks(block_cache, missing)?;
+
             if runs.is_empty() {
                 return Err(FileError::NoMoreBlocks);
             }
-            mark_blocks_used(disk, &runs)?;
-            for r in &runs {
-                for p in r.physical_start..r.physical_start + r.length {
-                    new_blocks.push(p);
+
+            mark_blocks_used(block_cache, &runs)?;
+
+            for extent in &runs {
+                for block_id in
+                    extent.physical_start..extent.physical_start + extent.length
+                {
+                    new_blocks.push(block_id);
                 }
             }
-            superblock.free_blocks -= missing;
+
+            block_cache.get_superblock_mut()?.free_blocks -= missing;
         }
-        let mut originals: Vec<(u64, Vec<u8>)> = Vec::new();
+
+        let mut originals = Vec::new();
+
         let data_result = (|| -> Result<(), FileError> {
-            let mut ni = 0usize;
+            let mut new_index = 0usize;
+
             for lb in first_block..=last_block {
-                let mut block = match physical_of(&extents, lb) {
-                    Some(p) => {
-                        let b = Block::deserialise(disk, p)?;
-                        originals.push((p, b.buf.clone()));
-                        b
-                    }
+                let physical = match physical_of(&extents, lb) {
+                    Some(p) => p,
+
                     None => {
-                        let p = new_blocks[ni];
-                        ni += 1;
-                        Block {
-                            id: p,
-                            header: BlockHeader { lsn: 0, checksum: 0, flag: Flag::Clean },
-                            buf: vec![0u8; BLOCK_SIZE],
-                        }
+                        let p = new_blocks[new_index];
+                        new_index += 1;
+
+                        let block = block_cache.get_mut(p)?;
+                        block.buf[BLOCK_HEADER_SIZE..].fill(0);
+
+                        p
                     }
                 };
+
+                let block = block_cache.get_mut(physical)?;
+
+                if physical_of(&extents, lb).is_some() {
+                    originals.push((
+                        physical,
+                        block.buf[BLOCK_HEADER_SIZE..].to_vec(),
+                    ));
+                }
+
                 let block_start = lb * payload;
                 let block_end = block_start + payload;
+
                 if base > old_size {
-                    let hs = old_size.max(block_start);
-                    let he = base.min(block_end);
-                    if hs < he {
-                        block.buf[BLOCK_HEADER_SIZE + (hs - block_start) as usize
-                            ..BLOCK_HEADER_SIZE + (he - block_start) as usize]
+                    let hole_start = old_size.max(block_start);
+                    let hole_end = base.min(block_end);
+
+                    if hole_start < hole_end {
+                        block.buf[
+                            BLOCK_HEADER_SIZE + (hole_start - block_start) as usize
+                                ..BLOCK_HEADER_SIZE + (hole_end - block_start) as usize
+                        ]
                             .fill(0);
                     }
                 }
-                let ds = base.max(block_start);
-                let de = end.min(block_end);
-                if ds < de {
-                    block.buf[BLOCK_HEADER_SIZE + (ds - block_start) as usize
-                        ..BLOCK_HEADER_SIZE + (de - block_start) as usize]
-                        .copy_from_slice(&buf[(ds - base) as usize..(de - base) as usize]);
+
+                let data_start = base.max(block_start);
+                let data_end = end.min(block_end);
+
+                if data_start < data_end {
+                    block.buf[
+                        BLOCK_HEADER_SIZE + (data_start - block_start) as usize
+                            ..BLOCK_HEADER_SIZE + (data_end - block_start) as usize
+                    ]
+                        .copy_from_slice(
+                            &buf[
+                                (data_start - base) as usize
+                                    ..(data_end - base) as usize
+                            ],
+                        );
                 }
-                block.write_block(disk)?;
             }
+
             Ok(())
         })();
-        if let Err(e) = data_result {
-            restore_blocks(disk, &originals);
+
+        if let Err(error) = data_result {
+            restore_blocks(block_cache, &originals)?;
+
             if !runs.is_empty() {
-                let _ = mark_blocks_free(disk, &runs);
+                mark_blocks_free(block_cache, &runs)?;
+                block_cache.get_superblock_mut()?.free_blocks += missing;
             }
-            return Err(e);
+
+            return Err(error);
         }
+
         let mut pieces: Vec<Extent> = Vec::new();
+
         for (i, &lb) in missing_blocks.iter().enumerate() {
             let pb = new_blocks[i];
+
             if let Some(last) = pieces.last_mut() {
-                if last.logical_end() == lb && last.physical_start + last.length == pb {
+                if last.logical_end() == lb
+                    && last.physical_start + last.length == pb
+                {
                     last.length += 1;
                     continue;
                 }
             }
-            pieces.push(Extent { logical_start: lb, physical_start: pb, length: 1 });
+
+            pieces.push(Extent {
+                logical_start: lb,
+                physical_start: pb,
+                length: 1,
+            });
         }
 
-        let mut tree_blocks: u64 = 0;
+        let mut tree_blocks = 0u64;
+
         for piece in &pieces {
-            let mut alloc = || -> Result<u64, FileError> {
-                let b = allocate_block(disk, &mut superblock)?;
+            let mut alloc = |cache: &mut BlockCache| -> Result<u64, FileError> {
+                let block = allocate_block(cache)?;
                 tree_blocks += 1;
-                Ok(b)
+                Ok(block)
             };
-            let freed = insert_extent(disk, &mut inode.i_extents, *piece, &mut alloc)?;
+
+            let freed = insert_extent(
+                block_cache,
+                &mut inode.i_extents,
+                *piece,
+                &mut alloc,
+            )?;
+
             if !freed.is_empty() {
-                let n: u64 = freed.iter().map(|e| e.length).sum();
-                mark_blocks_free(disk, &freed)?;
-                superblock.free_blocks += n;
+                let freed_count: u64 =
+                    freed.iter().map(|e| e.length).sum();
+
+                mark_blocks_free(block_cache, &freed)?;
+                block_cache.get_superblock_mut()?.free_blocks += freed_count;
             }
         }
 
         let now = now_secs();
+
         inode.i_size = old_size.max(end);
         inode.i_blocks += missing + tree_blocks;
         inode.i_mtime = now;
         inode.i_ctime = now;
-        write_inode(disk, self.inode, &inode.serialise())?;
-        disk.write_all_at(&superblock.serialise(), 0)
-            .map_err(|_| FileError::WriteError)?;
+
+        write_inode(block_cache, self.inode, &inode.serialise())?;
+
         self.offset = end;
         Ok(buf.len())
     }
-
 
     pub fn read(&mut self, length: usize) -> Result<Vec<u8>, FileError> {
         if self.flags & O_ACCMODE == O_WRONLY {
             return Err(FileError::PermissionDenied);
         }
-        let out = read_at(&self.fs.disk, self.inode, self.offset, length)?;
+
+        let out = read_at(
+            &mut self.fs.block_cache,
+            self.inode,
+            self.offset,
+            length,
+        )?;
+
         self.offset += out.len() as u64;
         Ok(out)
     }
 }
 
-pub fn read_at(disk: &std::fs::File, inode_id: u64, offset: u64, length: usize) -> Result<Vec<u8>, FileError> {
-    let superblock = SuperBlock::deserialise(disk)?;
-    let mut inode = find_inode(disk, inode_id)?;
+pub fn read_at(
+    block_cache: &mut BlockCache,
+    inode_id: u64,
+    offset: u64,
+    length: usize,
+) -> Result<Vec<u8>, FileError> {
+    let total_size = block_cache.get_superblock()?.total_size;
+    let inode = find_inode(block_cache, inode_id)?;
+
     if is_dir(inode.i_mode) {
         return Err(FileError::NotFile);
     }
-    if inode.i_size > superblock.total_size {
+
+    if inode.i_size > total_size {
         return Err(FileError::CorruptedINode);
     }
+
     if offset >= inode.i_size || length == 0 {
         return Ok(Vec::new());
     }
+
     let payload = (BLOCK_SIZE - BLOCK_HEADER_SIZE) as u64;
     let end_offset = offset.saturating_add(length as u64).min(inode.i_size);
     let read_len = (end_offset - offset) as usize;
     let start_block = offset / payload;
     let end_block = (end_offset - 1) / payload + 1;
-    let extents = range_lookup(disk, &inode.i_extents, start_block, end_block)?;
+
+    let extents = range_lookup(
+        block_cache,
+        &inode.i_extents,
+        start_block,
+        end_block,
+    )?;
 
     let mut result = vec![0u8; read_len];
-    for e in &extents {
-        let first = start_block.max(e.logical_start);
-        let last = end_block.min(e.logical_end());
+
+    for extent in &extents {
+        let first = start_block.max(extent.logical_start);
+        let last = end_block.min(extent.logical_end());
+
         for lb in first..last {
-            let pb = e
+            let physical = extent
                 .physical_start
-                .checked_add(lb - e.logical_start)
+                .checked_add(lb - extent.logical_start)
                 .ok_or(FileError::CorruptedINode)?;
-            let block = Block::deserialise(disk, pb)?;
+
+            let block = block_cache.get(physical)?;
             let block_start = lb * payload;
-            let s = offset.max(block_start);
-            let en = end_offset.min(block_start.saturating_add(payload));
-            let dst = (s - offset) as usize..(en - offset) as usize;
-            let src = BLOCK_HEADER_SIZE + (s - block_start) as usize
-                ..BLOCK_HEADER_SIZE + (en - block_start) as usize;
+            let start = offset.max(block_start);
+            let end = end_offset.min(block_start.saturating_add(payload));
+
+            let dst = (start - offset) as usize..(end - offset) as usize;
+            let src = BLOCK_HEADER_SIZE + (start - block_start) as usize
+                ..BLOCK_HEADER_SIZE + (end - block_start) as usize;
+
             result[dst].copy_from_slice(&block.buf[src]);
         }
     }
+
+    let mut inode = inode;
     inode.i_atime = now_secs();
-    write_inode(disk, inode_id, &inode.serialise())?;
+
+    write_inode(block_cache, inode_id, &inode.serialise())?;
     Ok(result)
 }
-

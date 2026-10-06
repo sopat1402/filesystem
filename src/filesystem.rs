@@ -7,9 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::os::unix::prelude::FileExt;
 use crate::constants::*;
 use crate::files::File;
+use crate::block_cache::BlockCache;
 
 pub struct Filesystem {
-    pub disk: std::fs::File,
+    pub block_cache : BlockCache,
 }
 
 impl Filesystem {
@@ -20,26 +21,28 @@ impl Filesystem {
             .write(true)
             .open(path)
             .map_err(|_| FileError::OpenError)?;
-        Ok(Self { disk })
+        Ok(Self {
+            block_cache : BlockCache::new(disk),
+        })
     }
 
-    pub fn stat(&self, ino: u64) -> Result<Stat, FileError> {
-        crate::inode::stat(&self.disk, ino)
+    pub fn stat(&mut self, ino: u64) -> Result<Stat, FileError> {
+        crate::inode::stat(&mut self.block_cache, ino)
     }
 
-    pub fn lookup(&self, parent: u64, name: &str) -> Result<Stat, FileError> {
-        crate::directories::lookup(&self.disk, parent, name)
+    pub fn lookup(&mut self, parent: u64, name: &str) -> Result<Stat, FileError> {
+        crate::directories::lookup(&mut self.block_cache, parent, name)
     }
 
-    pub fn read_dir(&self, ino: u64) -> Result<Vec<(String, u64)>, FileError> {
-        crate::directories::read_dir(&self.disk, ino)
+    pub fn read_dir(&mut self, ino: u64) -> Result<Vec<(String, u64)>, FileError> {
+        crate::directories::read_dir(&mut self.block_cache, ino)
     }
 
-    pub fn read_at(&self, ino: u64, offset: u64, len: usize) -> Result<Vec<u8>, FileError> {
-        crate::files::read_at(&self.disk, ino, offset, len)
+    pub fn read_at(&mut self, ino: u64, offset: u64, len: usize) -> Result<Vec<u8>, FileError> {
+        crate::files::read_at(&mut self.block_cache, ino, offset, len)
     }
 
-    pub fn write_at(&self,inode: u64,offset: u64,buf: &[u8],) -> Result<usize, FileError> {
+    pub fn write_at(&mut self,inode: u64,offset: u64,buf: &[u8],) -> Result<usize, FileError> {
         let mut file = File {
             fs: self,
             inode,
@@ -224,10 +227,9 @@ pub fn create_disk(path: &str, disk_size: u64, inode_ratio: u64) -> Result<(), F
     Ok(())
 }
 
-pub fn reserve_inode(disk: &std::fs::File, mode: u16, uid: u32, gid: u32) -> Result<u64, FileError> {
-    let mut superblock = SuperBlock::deserialise(disk)?;
-    let inode_id = find_free_inode(disk)?.ok_or(FileError::NoInodes)?;
-    let mut inode = crate::inode::find_inode(disk, inode_id)?;
+pub fn reserve_inode(block_cache:&mut BlockCache, mode: u16, uid: u32, gid: u32) -> Result<u64, FileError> {
+    let inode_id = find_free_inode(block_cache)?.ok_or(FileError::NoInodes)?;
+    let mut inode = crate::inode::find_inode(block_cache, inode_id)?;
     let now = now_secs();
     inode.i_uid = uid;
     inode.i_gid = gid;
@@ -243,13 +245,12 @@ pub fn reserve_inode(disk: &std::fs::File, mode: u16, uid: u32, gid: u32) -> Res
     inode.i_reserved = [0u8; 12];
     inode.i_size = 0;
     inode.i_links_count = 0;
-    crate::inode::write_inode(disk, inode_id, &inode.serialise())?;
-    mark_inode_used(disk, inode_id)?;
+    crate::inode::write_inode(block_cache, inode_id, &inode.serialise())?;
+    mark_inode_used(block_cache, inode_id)?;
+    let superblock = block_cache.get_superblock_mut()?;
     superblock.free_inodes = superblock
         .free_inodes
         .checked_sub(1)
         .ok_or(FileError::NoInodes)?;
-    disk.write_all_at(&superblock.serialise(), 0)
-        .map_err(|_| FileError::WriteError)?;
     Ok(inode_id)
 }

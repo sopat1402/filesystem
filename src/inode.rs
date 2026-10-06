@@ -1,6 +1,5 @@
 use crate::file_errors::FileError;
-use std::fs::File;
-use crate::block::{Block};
+use crate::block_cache::BlockCache;
 use crate::extent_tree::{ExtentTreeNode};
 use crate::constants::*;
 
@@ -24,14 +23,14 @@ pub struct Inode {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Stat {
-    pub ino: u64,        // raw, 0-based; the FUSE layer adds 1
+    pub ino: u64,
     pub generation: u32,
     pub mode: u16,
     pub nlink: u16,
     pub uid: u32,
     pub gid: u32,
     pub size: u64,
-    pub blocks: u64,     // filesystem blocks; the FUSE layer multiplies by 8 for 512-byte units
+    pub blocks: u64,
     pub atime: u64,
     pub mtime: u64,
     pub ctime: u64,
@@ -55,8 +54,8 @@ impl Stat {
     }
 }
 
-pub fn stat(disk: &File, inode_id: u64) -> Result<Stat, FileError> {
-    let inode = find_inode(disk, inode_id)?;
+pub fn stat(block_cache:&mut BlockCache, inode_id: u64) -> Result<Stat, FileError> {
+    let inode = find_inode(block_cache, inode_id)?;
     Ok(Stat::from_inode(inode_id, &inode))
 }
 
@@ -191,27 +190,26 @@ impl Inode {
     }
 }
 
-pub fn find_inode(disk:&File,inode_id:u64)->Result<Inode,FileError>{
-    let superblock=crate::block::SuperBlock::deserialise(disk)?;
+pub fn find_inode(block_cache:&mut BlockCache,inode_id:u64)->Result<Inode,FileError>{
+    let superblock=block_cache.get_superblock()?;
     if inode_id >= superblock.inode_count {
         return Err(FileError::CorruptedINode);
     }
     let block_id=superblock.inode_map_start+inode_id/INODES_PER_BLOCK as u64;
     let offset=BLOCK_HEADER_SIZE+((inode_id%INODES_PER_BLOCK as u64)*INODE_SIZE as u64) as usize;
-    let block=Block::deserialise(disk,block_id)?;
+    let block=block_cache.get(block_id)?;
     let inode=Inode::deserialise(&block.buf[offset..offset+INODE_SIZE])?;
     Ok(inode)
 }
 
-pub fn write_inode(disk:&File, inode_id:u64, buf:&[u8])->Result<(),FileError>{
-    let superblock=crate::block::SuperBlock::deserialise(disk)?;
+pub fn write_inode(block_cache:&mut BlockCache, inode_id:u64, buf:&[u8])->Result<(),FileError>{
+    let superblock=block_cache.get_superblock()?;
     if inode_id >= superblock.inode_count || buf.len() != INODE_SIZE {
         return Err(FileError::CorruptedINode);
     }
     let block_id=superblock.inode_map_start+inode_id/INODES_PER_BLOCK as u64;
     let offset=BLOCK_HEADER_SIZE+((inode_id%INODES_PER_BLOCK as u64)*INODE_SIZE as u64) as usize;
-    let mut block=Block::deserialise(disk,block_id)?;
+    let block=block_cache.get_mut(block_id)?;
     block.buf[offset..offset+INODE_SIZE].copy_from_slice(buf);
-    block.write_block(disk)?;
     Ok(())
 }

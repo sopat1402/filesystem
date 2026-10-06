@@ -1,7 +1,7 @@
+use filesystem::directories::{delete, make_dir, rename_dirent};
 use filesystem::file_errors::FileError;
 use filesystem::filesystem::Filesystem;
-use filesystem::directories::{delete,make_dir,rename_dirent};
-use filesystem::inode::{find_inode,write_inode};
+use filesystem::inode::{find_inode, write_inode};
 use std::os::fd::RawFd;
 
 #[repr(C)]
@@ -233,9 +233,7 @@ unsafe fn read_struct<T: Copy>(buf: &[u8]) -> Option<T> {
         return None;
     }
 
-    Some(unsafe {
-        std::ptr::read_unaligned(buf.as_ptr() as *const T)
-    })
+    Some(unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const T) })
 }
 
 fn as_bytes<T: Copy>(value: &T) -> &[u8] {
@@ -248,20 +246,27 @@ fn as_bytes<T: Copy>(value: &T) -> &[u8] {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
-fn split_request(buf: &[u8], bytes_read: usize) -> Result<(FuseInHeader, Vec<u8>), FileError> {
+fn split_request(
+    buf: &[u8],
+    bytes_read: usize,
+) -> Result<(FuseInHeader, Vec<u8>), FileError> {
     if bytes_read < std::mem::size_of::<FuseInHeader>() || buf.len() < bytes_read {
         return Err(FileError::InvalidRequest);
     }
-    let header = unsafe {
-        read_struct::<FuseInHeader>(&buf[..bytes_read])
-    }
-    .ok_or(FileError::InvalidRequest)?;
+
+    let header = unsafe { read_struct::<FuseInHeader>(&buf[..bytes_read]) }
+        .ok_or(FileError::InvalidRequest)?;
+
     if header.len as usize != bytes_read {
         return Err(FileError::InvalidRequest);
     }
+
     let body = buf[std::mem::size_of::<FuseInHeader>()..bytes_read].to_vec();
     Ok((header, body))
 }
@@ -272,6 +277,7 @@ fn build_reply(unique: u64, errno: i32, body: &[u8]) -> Vec<u8> {
         error: -errno,
         unique,
     };
+
     let mut reply = Vec::with_capacity(header.len as usize);
     reply.extend_from_slice(as_bytes(&header));
     reply.extend_from_slice(body);
@@ -281,11 +287,17 @@ fn build_reply(unique: u64, errno: i32, body: &[u8]) -> Vec<u8> {
 fn get_fuse_fd(mountpoint: &str) -> Result<RawFd, FileError> {
     let mut sockets = [0; 2];
     let ret = unsafe {
-        libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sockets.as_mut_ptr())
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM,
+            0,
+            sockets.as_mut_ptr(),
+        )
     };
     if ret < 0 {
         return Err(FileError::OpenError);
     }
+
     let flags = unsafe { libc::fcntl(sockets[1], libc::F_GETFD) };
     if flags < 0 {
         unsafe {
@@ -294,8 +306,13 @@ fn get_fuse_fd(mountpoint: &str) -> Result<RawFd, FileError> {
         }
         return Err(FileError::OpenError);
     }
+
     let ret = unsafe {
-        libc::fcntl(sockets[1], libc::F_SETFD, flags & !libc::FD_CLOEXEC)
+        libc::fcntl(
+            sockets[1],
+            libc::F_SETFD,
+            flags & !libc::FD_CLOEXEC,
+        )
     };
     if ret < 0 {
         unsafe {
@@ -304,6 +321,7 @@ fn get_fuse_fd(mountpoint: &str) -> Result<RawFd, FileError> {
         }
         return Err(FileError::OpenError);
     }
+
     let _child = match std::process::Command::new("fusermount3")
         .arg("-o")
         .arg("fsname=myfs,default_permissions")
@@ -320,13 +338,14 @@ fn get_fuse_fd(mountpoint: &str) -> Result<RawFd, FileError> {
             return Err(FileError::OpenError);
         }
     };
+
     unsafe {
         libc::close(sockets[1]);
     }
+
     let mut data = [0u8; 1];
-    let cmsg_space = unsafe {
-        libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as usize
-    };
+    let cmsg_space =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as usize };
     let mut control = vec![0u8; cmsg_space];
     let mut iov = libc::iovec {
         iov_base: data.as_mut_ptr() as *mut libc::c_void,
@@ -337,38 +356,52 @@ fn get_fuse_fd(mountpoint: &str) -> Result<RawFd, FileError> {
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = control.len();
+
     let ret = unsafe { libc::recvmsg(sockets[0], &mut msg, 0) };
     if ret < 0 {
-        unsafe { libc::close(sockets[0]); }
+        unsafe {
+            libc::close(sockets[0]);
+        }
         return Err(FileError::ReadError);
     }
+
     let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
     if cmsg.is_null() {
-        unsafe { libc::close(sockets[0]); }
+        unsafe {
+            libc::close(sockets[0]);
+        }
         return Err(FileError::InvalidRequest);
     }
+
     let cmsg_ref = unsafe { &*cmsg };
-    if cmsg_ref.cmsg_level != libc::SOL_SOCKET || cmsg_ref.cmsg_type != libc::SCM_RIGHTS {
-        unsafe { libc::close(sockets[0]); }
+    if cmsg_ref.cmsg_level != libc::SOL_SOCKET
+        || cmsg_ref.cmsg_type != libc::SCM_RIGHTS
+    {
+        unsafe {
+            libc::close(sockets[0]);
+        }
         return Err(FileError::InvalidRequest);
     }
-    let fuse_fd = unsafe {
-        *(libc::CMSG_DATA(cmsg) as *const libc::c_int)
-    };
+
+    let fuse_fd = unsafe { *(libc::CMSG_DATA(cmsg) as *const libc::c_int) };
     unsafe {
         libc::close(sockets[0]);
     }
+
     Ok(fuse_fd)
 }
 
-fn handle_init(_header: &FuseInHeader, body: &[u8]) -> Result<Vec<u8>, FileError> {
-    let init_in = unsafe {
-        read_struct::<FuseInitIn>(body)
-    }
-    .ok_or(FileError::InvalidRequest)?;
+fn handle_init(
+    _header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    let init_in = unsafe { read_struct::<FuseInitIn>(body) }
+        .ok_or(FileError::InvalidRequest)?;
+
     if init_in.major != 7 {
         return Err(FileError::Unsupported);
     }
+
     let init_out = FuseInitOut {
         major: 7,
         minor: 31,
@@ -384,82 +417,119 @@ fn handle_init(_header: &FuseInHeader, body: &[u8]) -> Result<Vec<u8>, FileError
         max_stack_depth: 0,
         unused: [0; 6],
     };
+
     Ok(as_bytes(&init_out).to_vec())
 }
 
-fn handle_lookup(fs: &Filesystem, header: &FuseInHeader, body: &[u8]) -> Result<Vec<u8>, FileError> {
-    if body.len()==0 || body[body.len()-1]!=b'\0'{
+fn make_attr(
+    ino: u64,
+    mode: u16,
+    nlink: u16,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    blocks: u64,
+    atime: u64,
+    mtime: u64,
+    ctime: u64,
+) -> FuseAttr {
+    FuseAttr {
+        ino: ino + 1,
+        size,
+        blocks: blocks * 8,
+        atime,
+        mtime,
+        ctime,
+        atimensec: 0,
+        mtimensec: 0,
+        ctimensec: 0,
+        mode: mode as u32,
+        nlink: nlink as u32,
+        uid,
+        gid,
+        rdev: 0,
+        blksize: 4096,
+        flags: 0,
+    }
+}
+
+fn handle_lookup(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    if body.len() < 2 || body.last() != Some(&0) {
         return Err(FileError::InvalidRequest);
     }
-    let name = String::from_utf8(body[..body.len() - 1].to_vec()).map_err(|_| FileError::InvalidRequest)?;
-    let parent = header.nodeid - 1;
+
+    let name_bytes = &body[..body.len() - 1];
+    if name_bytes.is_empty() || name_bytes.contains(&0) || name_bytes.contains(&b'/') {
+        return Err(FileError::InvalidRequest);
+    }
+
+    let name = String::from_utf8(name_bytes.to_vec())
+        .map_err(|_| FileError::InvalidRequest)?;
+    let parent = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
     let stat = fs.lookup(parent, &name)?;
+
     let entry_out = FuseEntryOut {
-        generation: stat.generation as u64,
         nodeid: stat.ino + 1,
+        generation: stat.generation as u64,
         entry_valid: 1,
         attr_valid: 1,
         entry_valid_nsec: 0,
         attr_valid_nsec: 0,
-        attr: FuseAttr {
-            ino: stat.ino + 1,
-            size: stat.size,
-            blocks: stat.blocks * 8,
-            atime: stat.atime,
-            mtime: stat.mtime,
-            ctime: stat.ctime,
-            atimensec: 0,
-            mtimensec: 0,
-            ctimensec: 0,
-            mode: stat.mode as u32,
-            nlink: stat.nlink as u32,
-            uid: stat.uid,
-            gid: stat.gid,
-            rdev: 0,
-            blksize: 4096,
-            flags: 0,
-        },
+        attr: make_attr(
+            stat.ino, stat.mode, stat.nlink, stat.uid, stat.gid,
+            stat.size, stat.blocks, stat.atime, stat.mtime, stat.ctime,
+        ),
     };
+
     Ok(as_bytes(&entry_out).to_vec())
 }
 
-fn handle_getattr(fs: &Filesystem, header: &FuseInHeader, body: &[u8]) -> Result<Vec<u8>, FileError> {
-    let _getattr_in = unsafe {
-        read_struct::<FuseGetattrIn>(body)
-    }.ok_or(FileError::InvalidRequest)?;
-    let ino = header.nodeid - 1;
+fn handle_getattr(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    if !body.is_empty() && unsafe { read_struct::<FuseGetattrIn>(body) }.is_none() {
+        return Err(FileError::InvalidRequest);
+    }
+
+    let ino = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
     let attrs = fs.stat(ino)?;
-    let fuse_attr = FuseAttr {
-        ino: attrs.ino + 1,
-        size: attrs.size,
-        blocks: attrs.blocks * 8,
-        atime: attrs.atime,
-        mtime: attrs.mtime,
-        ctime: attrs.ctime,
-        atimensec: 0,
-        mtimensec: 0,
-        ctimensec: 0,
-        mode: attrs.mode as u32,
-        nlink: attrs.nlink as u32,
-        uid: attrs.uid,
-        gid: attrs.gid,
-        rdev: 0,
-        blksize: 4096,
-        flags: 0,
-    };
+
     let reply = FuseAttrOut {
         attr_valid: 1,
         attr_valid_nsec: 0,
         dummy: 0,
-        attr: fuse_attr,
+        attr: make_attr(
+            attrs.ino, attrs.mode, attrs.nlink, attrs.uid, attrs.gid,
+            attrs.size, attrs.blocks, attrs.atime, attrs.mtime, attrs.ctime,
+        ),
     };
+
     Ok(as_bytes(&reply).to_vec())
 }
 
-fn handle_opendir(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<Vec<u8>, FileError> {
-    let _open_in =
-        unsafe { read_struct::<FuseOpenIn>(body) }.ok_or(FileError::InvalidRequest)?;
-    let ino = header.nodeid.checked_sub(1).ok_or(FileError::InvalidRequest)?;
+fn handle_opendir(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    unsafe { read_struct::<FuseOpenIn>(body) }.ok_or(FileError::InvalidRequest)?;
+
+    let ino = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
     fs.read_dir(ino)?;
 
     let open_out = FuseOpenOut {
@@ -472,22 +542,30 @@ fn handle_opendir(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<V
 
 fn fuse_dirent_type(mode: u16) -> u32 {
     match mode & 0o170000 {
-        0o010000 => 1,  // FIFO
-        0o020000 => 2,  // character device
-        0o040000 => 4,  // directory
-        0o060000 => 6,  // block device
-        0o100000 => 8,  // regular file
-        0o120000 => 10, // symbolic link
-        0o140000 => 12, // socket
-        _ => 0,          // unknown
+        0o010000 => 1,
+        0o020000 => 2,
+        0o040000 => 4,
+        0o060000 => 6,
+        0o100000 => 8,
+        0o120000 => 10,
+        0o140000 => 12,
+        _ => 0,
     }
 }
 
-fn handle_readdir(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<Vec<u8>, FileError> {
-    let read_in =
-        unsafe { read_struct::<FuseReadIn>(body) }.ok_or(FileError::InvalidRequest)?;
-    let ino = header.nodeid.checked_sub(1).ok_or(FileError::InvalidRequest)?;
+fn handle_readdir(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    let read_in = unsafe { read_struct::<FuseReadIn>(body) }
+        .ok_or(FileError::InvalidRequest)?;
+    let ino = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
     let entries = fs.read_dir(ino)?;
+
     let start = usize::try_from(read_in.offset)
         .unwrap_or(usize::MAX)
         .min(entries.len());
@@ -503,6 +581,7 @@ fn handle_readdir(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<V
             .checked_add(7)
             .map(|len| len & !7)
             .ok_or(FileError::EOverflow)?;
+
         if reply.len().saturating_add(padded_len) > max_size {
             break;
         }
@@ -510,10 +589,11 @@ fn handle_readdir(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<V
         let child = fs.stat(*child_ino)?;
         let dirent = FuseDirent {
             ino: child.ino + 1,
-            off: (index as u64) + 1,
+            off: index as u64 + 1,
             namelen: name_len,
             typ: fuse_dirent_type(child.mode),
         };
+
         reply.extend_from_slice(as_bytes(&dirent));
         reply.extend_from_slice(name.as_bytes());
         reply.resize(reply.len() + padded_len - raw_len, 0);
@@ -523,32 +603,47 @@ fn handle_readdir(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<V
 }
 
 fn handle_releasedir(body: &[u8]) -> Result<Vec<u8>, FileError> {
-    let _release_in =
-        unsafe { read_struct::<FuseReleaseDirIn>(body) }.ok_or(FileError::InvalidRequest)?;
+    unsafe { read_struct::<FuseReleaseDirIn>(body) }.ok_or(FileError::InvalidRequest)?;
     Ok(Vec::new())
 }
 
-fn handle_read(fs:&Filesystem,header:&FuseInHeader,body:&[u8])->Result<Vec<u8>,FileError>{
-    let read_in =unsafe { 
-        read_struct::<FuseReadIn>(body) 
-    }.ok_or(FileError::InvalidRequest)?;
-    let ino = header.nodeid.checked_sub(1).ok_or(FileError::InvalidRequest)?;
-    let buf=fs.read_at(ino,read_in.offset,read_in.size as usize)?;
-    Ok(buf)
+fn handle_read(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    let read_in = unsafe { read_struct::<FuseReadIn>(body) }
+        .ok_or(FileError::InvalidRequest)?;
+    let ino = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
+    fs.read_at(ino, read_in.offset, read_in.size as usize)
 }
 
-fn handle_write(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<Vec<u8>, FileError> {
-    let write_in =unsafe {
-        read_struct::<FuseWriteIn>(body)
-    }.ok_or(FileError::InvalidRequest)?;
+fn handle_write(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    let write_in = unsafe { read_struct::<FuseWriteIn>(body) }
+        .ok_or(FileError::InvalidRequest)?;
     let data_start = std::mem::size_of::<FuseWriteIn>();
-    let data_len =usize::try_from(write_in.size).map_err(|_| FileError::EOverflow)?;
-    let data_end = data_start.checked_add(data_len).ok_or(FileError::EOverflow)?;
+    let data_len = usize::try_from(write_in.size).map_err(|_| FileError::EOverflow)?;
+    let data_end = data_start
+        .checked_add(data_len)
+        .ok_or(FileError::EOverflow)?;
+
     if data_end > body.len() {
         return Err(FileError::InvalidRequest);
     }
-    let ino = header.nodeid.checked_sub(1).ok_or(FileError::InvalidRequest)?;
+
+    let ino = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
     let written = fs.write_at(ino, write_in.offset, &body[data_start..data_end])?;
+
     let out = FuseWriteOut {
         size: u32::try_from(written).map_err(|_| FileError::EOverflow)?,
         padding: 0,
@@ -556,31 +651,42 @@ fn handle_write(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<Vec
     Ok(as_bytes(&out).to_vec())
 }
 
-fn handle_create(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<Vec<u8>, FileError> {
-    let create_in =unsafe { 
-        read_struct::<FuseCreateIn>(body) 
-    }.ok_or(FileError::InvalidRequest)?;
+fn handle_create(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    let create_in = unsafe { read_struct::<FuseCreateIn>(body) }
+        .ok_or(FileError::InvalidRequest)?;
     let name_start = std::mem::size_of::<FuseCreateIn>();
+
     if body.len() <= name_start || body.last() != Some(&0) {
         return Err(FileError::InvalidRequest);
     }
+
     let name_bytes = &body[name_start..body.len() - 1];
     if name_bytes.is_empty() || name_bytes.contains(&0) || name_bytes.contains(&b'/') {
         return Err(FileError::InvalidRequest);
     }
-    let name = String::from_utf8(name_bytes.to_vec()).map_err(|_| FileError::InvalidRequest)?;
+
+    let name = String::from_utf8(name_bytes.to_vec())
+        .map_err(|_| FileError::InvalidRequest)?;
     let parent_ino = header
         .nodeid
         .checked_sub(1)
         .ok_or(FileError::InvalidRequest)?;
     let parent = fs.stat(parent_ino)?;
+
     if parent.mode & 0o170000 != 0o040000 {
         return Err(FileError::NotDirectory);
     }
+
     let permissions = (create_in.mode & 0o7777) & !(create_in.umask & 0o7777);
-    let mode = u16::try_from(0o100000u32 | permissions).map_err(|_| FileError::InvalidRequest)?;
+    let mode = u16::try_from(0o100000u32 | permissions)
+        .map_err(|_| FileError::InvalidRequest)?;
+
     let ino = filesystem::directories::add_dirent(
-        &fs.disk,
+        &mut fs.block_cache,
         parent_ino,
         name,
         mode,
@@ -588,6 +694,7 @@ fn handle_create(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<Ve
         header.gid,
     )?;
     let stat = fs.stat(ino)?;
+
     let entry_out = FuseEntryOut {
         nodeid: stat.ino + 1,
         generation: stat.generation as u64,
@@ -595,30 +702,17 @@ fn handle_create(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<Ve
         attr_valid: 1,
         entry_valid_nsec: 0,
         attr_valid_nsec: 0,
-        attr: FuseAttr {
-            ino: stat.ino + 1,
-            size: stat.size,
-            blocks: stat.blocks * 8,
-            atime: stat.atime,
-            mtime: stat.mtime,
-            ctime: stat.ctime,
-            atimensec: 0,
-            mtimensec: 0,
-            ctimensec: 0,
-            mode: stat.mode as u32,
-            nlink: stat.nlink as u32,
-            uid: stat.uid,
-            gid: stat.gid,
-            rdev: 0,
-            blksize: 4096,
-            flags: 0,
-        },
+        attr: make_attr(
+            stat.ino, stat.mode, stat.nlink, stat.uid, stat.gid,
+            stat.size, stat.blocks, stat.atime, stat.mtime, stat.ctime,
+        ),
     };
     let open_out = FuseOpenOut {
         fh: 0,
         open_flags: 0,
         padding: 0,
     };
+
     let mut reply = Vec::with_capacity(
         std::mem::size_of::<FuseEntryOut>() + std::mem::size_of::<FuseOpenOut>(),
     );
@@ -627,7 +721,11 @@ fn handle_create(fs: &Filesystem,header: &FuseInHeader,body: &[u8]) -> Result<Ve
     Ok(reply)
 }
 
-fn handle_setattr(fs: &Filesystem, header: &FuseInHeader, body: &[u8]) -> Result<Vec<u8>, FileError> {
+fn handle_setattr(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
     const MODE: u32 = 1 << 0;
     const ATIME: u32 = 1 << 4;
     const MTIME: u32 = 1 << 5;
@@ -642,33 +740,69 @@ fn handle_setattr(fs: &Filesystem, header: &FuseInHeader, body: &[u8]) -> Result
     const FATTR_SIZE: u32 = 1 << 3;
     const FATTR_OPEN: u32 = 1 << 14;
     const FATTR_LOCKOWNER: u32 = 1 << 9;
-    const SUPPORTED: u32 = MODE | FATTR_SIZE | FATTR_LOCKOWNER | FATTR_OPEN
-        | ATIME | MTIME | FH | ATIME_NOW | MTIME_NOW | CTIME
-        | KILL_SUIDGID | KILL_SUID | KILL_SGID | TIMES_SET;
-    let input = unsafe { read_struct::<FuseSetattrIn>(body) }.ok_or(FileError::InvalidRequest)?;
-    println!("{} {} {}",input.valid,input.size,input.valid&!SUPPORTED);
+    const SUPPORTED: u32 = MODE
+        | FATTR_SIZE
+        | FATTR_LOCKOWNER
+        | FATTR_OPEN
+        | ATIME
+        | MTIME
+        | FH
+        | ATIME_NOW
+        | MTIME_NOW
+        | CTIME
+        | KILL_SUIDGID
+        | KILL_SUID
+        | KILL_SGID
+        | TIMES_SET;
+
+    let input = unsafe { read_struct::<FuseSetattrIn>(body) }
+        .ok_or(FileError::InvalidRequest)?;
     if input.valid & !SUPPORTED != 0 {
         return Err(FileError::Unsupported);
     }
-    let ino = header.nodeid.checked_sub(1).ok_or(FileError::InvalidRequest)?;
-    let mut inode = find_inode(&fs.disk, ino)?;
+
+    let ino = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
+    let mut inode = find_inode(&mut fs.block_cache, ino)?;
+
     if header.uid != 0 && header.uid != inode.i_uid {
         return Err(FileError::PermissionDenied);
     }
+
+    // This filesystem currently supports truncating to zero only.
+    // Refetch before applying other attributes so they are not discarded.
+    if input.valid & FATTR_SIZE != 0 {
+        if input.size != 0 {
+            return Err(FileError::Unsupported);
+        }
+        if inode.i_mode & 0o170000 != 0o100000 {
+            return Err(FileError::NotFile);
+        }
+
+        filesystem::files::truncate_to_zero(&mut fs.block_cache, ino)?;
+        inode = find_inode(&mut fs.block_cache, ino)?;
+    }
+
     let now = now_secs();
+
     if input.valid & MODE != 0 {
         inode.i_mode = (inode.i_mode & !0o7777) | (input.mode as u16 & 0o7777);
     }
+
     if input.valid & ATIME_NOW != 0 {
         inode.i_atime = now;
     } else if input.valid & ATIME != 0 {
         inode.i_atime = input.atime;
     }
+
     if input.valid & MTIME_NOW != 0 {
         inode.i_mtime = now;
     } else if input.valid & MTIME != 0 {
         inode.i_mtime = input.mtime;
     }
+
     if input.valid & KILL_SUIDGID != 0 {
         inode.i_mode &= !0o6000;
     } else {
@@ -679,60 +813,53 @@ fn handle_setattr(fs: &Filesystem, header: &FuseInHeader, body: &[u8]) -> Result
             inode.i_mode &= !0o2000;
         }
     }
+
     if input.valid & CTIME != 0 {
         inode.i_ctime = input.ctime;
-    } else if input.valid & (MODE | ATIME | MTIME | ATIME_NOW | MTIME_NOW | KILL_SUIDGID | KILL_SUID | KILL_SGID) != 0 {
+    } else if input.valid
+        & (MODE | ATIME | MTIME | ATIME_NOW | MTIME_NOW | KILL_SUIDGID | KILL_SUID | KILL_SGID)
+        != 0
+    {
         inode.i_ctime = now;
     }
-    if input.valid & FATTR_SIZE != 0 {
-        if input.size != 0 {
-            return Err(FileError::Unsupported);
-        }
-        if inode.i_mode & 0o170000 != 0o100000 {
-            return Err(FileError::NotFile);
-        }
-        filesystem::files::truncate_to_zero(&fs.disk, ino)?;
-        inode = find_inode(&fs.disk, ino)?;
-    }
-    write_inode(&fs.disk, ino, &inode.serialise())?;
+
+    write_inode(&mut fs.block_cache, ino, &inode.serialise())?;
+
     let attrs = fs.stat(ino)?;
     let reply = FuseAttrOut {
         attr_valid: 1,
         attr_valid_nsec: 0,
         dummy: 0,
-        attr: FuseAttr {
-            ino: attrs.ino + 1,
-            size: attrs.size,
-            blocks: attrs.blocks * 8,
-            atime: attrs.atime,
-            mtime: attrs.mtime,
-            ctime: attrs.ctime,
-            atimensec: 0,
-            mtimensec: 0,
-            ctimensec: 0,
-            mode: attrs.mode as u32,
-            nlink: attrs.nlink as u32,
-            uid: attrs.uid,
-            gid: attrs.gid,
-            rdev: 0,
-            blksize: 4096,
-            flags: 0,
-        },
+        attr: make_attr(
+            attrs.ino, attrs.mode, attrs.nlink, attrs.uid, attrs.gid,
+            attrs.size, attrs.blocks, attrs.atime, attrs.mtime, attrs.ctime,
+        ),
     };
     Ok(as_bytes(&reply).to_vec())
 }
 
-fn handle_open(fs: &Filesystem, header: &FuseInHeader, body: &[u8]) -> Result<Vec<u8>, FileError> {
-    let open_in = unsafe { read_struct::<FuseOpenIn>(body) }.ok_or(FileError::InvalidRequest)?;
-    let ino = header.nodeid.checked_sub(1).ok_or(FileError::InvalidRequest)?;
+fn handle_open(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    let open_in = unsafe { read_struct::<FuseOpenIn>(body) }
+        .ok_or(FileError::InvalidRequest)?;
+    let ino = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
     let access = open_in.flags & libc::O_ACCMODE as u32;
+
     if access == libc::O_ACCMODE as u32 {
         return Err(FileError::InvalidFlags);
     }
+
     let attrs = fs.stat(ino)?;
-    if attrs.mode & 0o170000 == 0o040000 {
+    if attrs.mode & 0o170000 == 0o040000 && access != libc::O_RDONLY as u32 {
         return Err(FileError::NotFile);
     }
+
     let open_out = FuseOpenOut {
         fh: access as u64,
         open_flags: 0,
@@ -741,43 +868,85 @@ fn handle_open(fs: &Filesystem, header: &FuseInHeader, body: &[u8]) -> Result<Ve
     Ok(as_bytes(&open_out).to_vec())
 }
 
-fn handle_release(_body:&[u8])->Result<Vec<u8>,FileError>{
+fn handle_release(body: &[u8]) -> Result<Vec<u8>, FileError> {
+    if body.len() < 24 {
+        return Err(FileError::InvalidRequest);
+    }
     Ok(Vec::new())
 }
 
-fn handle_delete(fs: &Filesystem,header:&FuseInHeader,body: &[u8])->Result<Vec<u8>,FileError>{
-    let parent_inode=header.nodeid.checked_sub(1).ok_or(FileError::InvalidRequest)?;
-    if body.last() != Some(&0){
+fn handle_delete(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+    expect_directory: bool,
+) -> Result<Vec<u8>, FileError> {
+    let parent_inode = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
+
+    if body.last() != Some(&0) {
         return Err(FileError::InvalidRequest);
     }
-    let name_bytes = &body[0..body.len() - 1];
+
+    let name_bytes = &body[..body.len() - 1];
     if name_bytes.is_empty() || name_bytes.contains(&0) || name_bytes.contains(&b'/') {
         return Err(FileError::InvalidRequest);
     }
-    let name = String::from_utf8(name_bytes.to_vec()).map_err(|_| FileError::InvalidRequest)?;
-    delete(&fs.disk,parent_inode,name)?;
+
+    let name = String::from_utf8(name_bytes.to_vec())
+        .map_err(|_| FileError::InvalidRequest)?;
+    let child = fs.lookup(parent_inode, &name)?;
+    let child_is_dir = child.mode & 0o170000 == 0o040000;
+
+    if expect_directory && !child_is_dir {
+        return Err(FileError::NotDirectory);
+    }
+    if !expect_directory && child_is_dir {
+        return Err(FileError::NotFile);
+    }
+
+    delete(&mut fs.block_cache, parent_inode, name)?;
     Ok(Vec::new())
 }
 
-fn handle_makedir(fs: &Filesystem,header:&FuseInHeader,body: &[u8])->Result<Vec<u8>,FileError>{
-    let mkdir_in =unsafe { 
-        read_struct::<FuseMkdirIn>(body) 
-    }.ok_or(FileError::InvalidRequest)?;
+fn handle_makedir(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    let mkdir_in = unsafe { read_struct::<FuseMkdirIn>(body) }
+        .ok_or(FileError::InvalidRequest)?;
     let name_start = std::mem::size_of::<FuseMkdirIn>();
+
     if body.len() <= name_start || body.last() != Some(&0) {
         return Err(FileError::InvalidRequest);
     }
+
     let name_bytes = &body[name_start..body.len() - 1];
     if name_bytes.is_empty() || name_bytes.contains(&0) || name_bytes.contains(&b'/') {
         return Err(FileError::InvalidRequest);
     }
-    let name = String::from_utf8(name_bytes.to_vec()).map_err(|_| FileError::InvalidRequest)?;
-    let parent_inode=header.nodeid.checked_sub(1).ok_or(FileError::InvalidFlags)?;
-    let permissions =((mkdir_in.mode & 0o7777) & !(mkdir_in.umask & 0o7777)) as u16;
+
+    let name = String::from_utf8(name_bytes.to_vec())
+        .map_err(|_| FileError::InvalidRequest)?;
+    let parent_inode = header
+        .nodeid
+        .checked_sub(1)
+        .ok_or(FileError::InvalidRequest)?;
+    let permissions = ((mkdir_in.mode & 0o7777) & !(mkdir_in.umask & 0o7777)) as u16;
+
     let new_id = make_dir(
-        &fs.disk, parent_inode, name, header.uid, header.gid, permissions
+        &mut fs.block_cache,
+        parent_inode,
+        name,
+        header.uid,
+        header.gid,
+        permissions,
     )?;
     let stat = fs.stat(new_id)?;
+
     let entry_out = FuseEntryOut {
         nodeid: stat.ino + 1,
         generation: stat.generation as u64,
@@ -785,81 +954,92 @@ fn handle_makedir(fs: &Filesystem,header:&FuseInHeader,body: &[u8])->Result<Vec<
         attr_valid: 1,
         entry_valid_nsec: 0,
         attr_valid_nsec: 0,
-        attr: FuseAttr {
-            ino: stat.ino + 1,
-            size: stat.size,
-            blocks: stat.blocks * 8,
-            atime: stat.atime,
-            mtime: stat.mtime,
-            ctime: stat.ctime,
-            atimensec: 0,
-            mtimensec: 0,
-            ctimensec: 0,
-            mode: stat.mode as u32,
-            nlink: stat.nlink as u32,
-            uid: stat.uid,
-            gid: stat.gid,
-            rdev: 0,
-            blksize: 4096,
-            flags: 0,
-        },
+        attr: make_attr(
+            stat.ino, stat.mode, stat.nlink, stat.uid, stat.gid,
+            stat.size, stat.blocks, stat.atime, stat.mtime, stat.ctime,
+        ),
     };
     Ok(as_bytes(&entry_out).to_vec())
 }
 
-fn handle_rename(fs:&Filesystem,header:&FuseInHeader,body: &[u8])->Result<Vec<u8>,FileError>{
+fn handle_rename(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
     let rename_in = unsafe { read_struct::<FuseRenameIn>(body) }
         .ok_or(FileError::InvalidRequest)?;
     let names_start = std::mem::size_of::<FuseRenameIn>();
     let names = body.get(names_start..).ok_or(FileError::InvalidRequest)?;
-    let old_end = names.iter()
+
+    let old_end = names
+        .iter()
         .position(|&b| b == 0)
         .ok_or(FileError::InvalidRequest)?;
     let new_start = old_end + 1;
     let new_tail = names.get(new_start..).ok_or(FileError::InvalidRequest)?;
-    let new_len = new_tail.iter()
+    let new_len = new_tail
+        .iter()
         .position(|&b| b == 0)
         .ok_or(FileError::InvalidRequest)?;
     let new_end = new_start + new_len;
+
     if old_end == 0 || new_len == 0 || new_end + 1 != names.len() {
         return Err(FileError::InvalidRequest);
     }
+
     let old_bytes = &names[..old_end];
     let new_bytes = &names[new_start..new_end];
     if old_bytes.contains(&b'/') || new_bytes.contains(&b'/') {
         return Err(FileError::InvalidRequest);
     }
+
     let old_name = String::from_utf8(old_bytes.to_vec())
         .map_err(|_| FileError::InvalidRequest)?;
     let new_name = String::from_utf8(new_bytes.to_vec())
         .map_err(|_| FileError::InvalidRequest)?;
-    let old_parent = header.nodeid.checked_sub(1)
+    let old_parent = header
+        .nodeid
+        .checked_sub(1)
         .ok_or(FileError::InvalidRequest)?;
-    let new_parent = rename_in.newdir.checked_sub(1)
+    let new_parent = rename_in
+        .newdir
+        .checked_sub(1)
         .ok_or(FileError::InvalidRequest)?;
-    rename_dirent(&fs.disk, old_parent, old_name, new_parent, new_name)?;
+
+    rename_dirent(
+        &mut fs.block_cache,
+        old_parent,
+        old_name,
+        new_parent,
+        new_name,
+    )?;
     Ok(Vec::new())
 }
 
-fn dispatch_request(fs: &Filesystem, header: &FuseInHeader, body: &[u8]) -> Result<Vec<u8>, FileError> {
+fn dispatch_request(
+    fs: &mut Filesystem,
+    header: &FuseInHeader,
+    body: &[u8],
+) -> Result<Vec<u8>, FileError> {
     match header.opcode {
-        1   => handle_lookup(fs, header, body),
-        3   => handle_getattr(fs, header, body),
-        4   => handle_setattr(fs,header,body),
-        9   => handle_makedir(fs,header,body),
-        10  => handle_delete(fs,header,body),
-        11  => handle_delete(fs,header,body),
-        12  => handle_rename(fs,header,body),
-        14  => handle_open(fs,header,body),
-        15  => handle_read(fs,header,body),
-        16  => handle_write(fs,header,body),
-        18  => handle_release(body),
-        26  => handle_init(header, body),
-        27  => handle_opendir(fs, header, body),
-        28  => handle_readdir(fs, header, body),
-        29  => handle_releasedir(body),
-        35  => handle_create(fs,header,body),
-        _   => Err(FileError::Unsupported),
+        1 => handle_lookup(fs, header, body),
+        3 => handle_getattr(fs, header, body),
+        4 => handle_setattr(fs, header, body),
+        9 => handle_makedir(fs, header, body),
+        10 => handle_delete(fs, header, body, false),
+        11 => handle_delete(fs, header, body, true),
+        12 => handle_rename(fs, header, body),
+        14 => handle_open(fs, header, body),
+        15 => handle_read(fs, header, body),
+        16 => handle_write(fs, header, body),
+        18 => handle_release(body),
+        26 => handle_init(header, body),
+        27 => handle_opendir(fs, header, body),
+        28 => handle_readdir(fs, header, body),
+        29 => handle_releasedir(body),
+        35 => handle_create(fs, header, body),
+        _ => Err(FileError::Unsupported),
     }
 }
 
@@ -888,11 +1068,13 @@ fn main() -> Result<(), FileError> {
         eprintln!("Usage: {} <image> <mountpoint>", args[0]);
         return Err(FileError::InvalidRequest);
     }
+
     let image = &args[1];
     let mountpoint = &args[2];
-    let fs = Filesystem::open(image.clone())?;
+    let mut fs = Filesystem::open(image.clone())?;
     let fuse_fd = get_fuse_fd(mountpoint)?;
     let mut buf = vec![0u8; 8192];
+
     loop {
         let bytes_read = unsafe {
             libc::read(
@@ -901,22 +1083,26 @@ fn main() -> Result<(), FileError> {
                 buf.len(),
             )
         };
+
         if bytes_read <= 0 {
-            unsafe { libc::close(fuse_fd); }
+            unsafe {
+                libc::close(fuse_fd);
+            }
             return Err(FileError::ReadError);
         }
+
         let (header, body) = split_request(&buf, bytes_read as usize)?;
-        println!("opcode : {}",header.opcode);
-        if header.opcode == 2 || header.opcode == 42{
+
+        // FORGET and BATCH_FORGET do not receive replies.
+        if header.opcode == 2 || header.opcode == 42 {
             continue;
         }
-        let (errno, response_body) = match dispatch_request(&fs, &header, &body) {
+
+        let (errno, response_body) = match dispatch_request(&mut fs, &header, &body) {
             Ok(response_body) => (0, response_body),
-            Err(error) => {
-                println!("error : {error}");
-                (error_to_errno(error), Vec::new())
-            },
+            Err(error) => (error_to_errno(error), Vec::new()),
         };
+
         let reply = build_reply(header.unique, errno, &response_body);
         let written = unsafe {
             libc::write(
@@ -925,8 +1111,11 @@ fn main() -> Result<(), FileError> {
                 reply.len(),
             )
         };
+
         if written != reply.len() as isize {
-            unsafe { libc::close(fuse_fd); }
+            unsafe {
+                libc::close(fuse_fd);
+            }
             return Err(FileError::WriteError);
         }
     }

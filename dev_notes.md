@@ -512,3 +512,13 @@ greedy algorithm. Then concurrency for a functional v1 and then the WAL.
 K so I wrote the cache. It passes mutable references and immutable references and marks it dirty there itself. No
 managing cloned bs. The technical term is a write back LRU. Anyways, I'll commit here and then start fixing all the
 calls to it all over. Will have lot of errors for a bit and a lot of untangling.
+
+😭 maybe I should start with a cache from now on. If I have to read the same shit from the disk over and over I'd
+make it so much cleaner to just make the cache early and not refactor later.
+
+Rust is ass fucking me with mutable borrows for the block cache. Every fucking closure uses a mutable borrow. Who the
+fuck needs to ask to compiler to edit HIS OWN FUCKING VARIABLES. Rust is a total bitch. C is better.
+
+I had to rewrite quite a lot of stuff in extent_tree.rs and directories and files. A bit in bitmaps too! I realised in
+bitmaps to mark a block used I was still scanning block by block instead of calculating the block I need. Same for inode.
+That would have meant marking them all as dirty. But anyways, now it is cleaned up. Block cache controls everything.

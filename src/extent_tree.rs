@@ -1,8 +1,7 @@
 use crate::block::Block;
 use crate::file_errors::FileError;
-use std::fs::File;
-use std::os::unix::prelude::FileExt;
 use crate::constants::*;
+use crate::block_cache::BlockCache;
 
 const _: () = assert!(
     NODE_HEADER_SIZE + ROOT_MAX_ENTRIES * ENTRY_SIZE + NON_EXTENT_FIELDS_SIZE == INODE_SIZE,
@@ -121,11 +120,10 @@ impl ExtentTreeNode {
     }
 
     pub fn read_node_with_block(
-        disk: &File,
+        block_cache: &mut BlockCache,
         block_num: u64,
-    ) -> Result<(Block, Self), FileError> {
-        let block = Block::deserialise(disk, block_num)?;
-
+    ) -> Result<Self, FileError> {
+        let block = block_cache.get(block_num)?;
         let mut offset = BLOCK_HEADER_SIZE;
 
         let magic = u16::from_le_bytes(
@@ -160,38 +158,31 @@ impl ExtentTreeNode {
         );
         offset += 2;
 
-        if entry_count > max_entries
-            || max_entries as usize > BLOCK_MAX_ENTRIES
-        {
+        if entry_count > max_entries || max_entries as usize > BLOCK_MAX_ENTRIES {
             return Err(FileError::CorruptedBlock);
         }
 
         let mut entries = vec![[0u8; ENTRY_SIZE]; entry_count as usize];
 
         for entry in &mut entries {
-            entry.copy_from_slice(
-                &block.buf[offset..offset + ENTRY_SIZE]
-            );
+            entry.copy_from_slice(&block.buf[offset..offset + ENTRY_SIZE]);
             offset += ENTRY_SIZE;
         }
 
-        let node = Self {
+        Ok(Self {
             magic,
             depth,
             entry_count,
             max_entries,
             entries,
-        };
-
-        Ok((block, node))
+        })
     }
 
     pub fn read_node(
-        disk: &File,
+        block_cache: &mut BlockCache,
         block_num: u64,
     ) -> Result<Self, FileError> {
-        Self::read_node_with_block(disk, block_num)
-            .map(|(_, node)| node)
+        Self::read_node_with_block(block_cache, block_num)
     }
 
     pub fn is_leaf(&self) -> bool {
@@ -208,28 +199,31 @@ impl ExtentTreeNode {
 }
 
 fn next_leaf_boundary(
-    disk: &File,
+    block_cache: &mut BlockCache,
     node: &ExtentTreeNode,
     pos: u64,
 ) -> Result<Option<u64>, FileError> {
     if node.is_leaf() {
         return Ok(None);
     }
+
     let i = find_child(node, pos)?;
     let mut best = if i + 1 < node.entries.len() {
         Some(node.get_index(i + 1).logical_start)
     } else {
         None
     };
-    let child = ExtentTreeNode::read_node(disk, node.get_index(i).child_block)?;
-    if let Some(b) = next_leaf_boundary(disk, &child, pos)? {
+
+    let child = ExtentTreeNode::read_node(block_cache, node.get_index(i).child_block)?;
+
+    if let Some(b) = next_leaf_boundary(block_cache, &child, pos)? {
         best = Some(best.map_or(b, |x| x.min(b)));
     }
+
     Ok(best)
 }
 
 pub fn write_external_block(
-    disk: &File,
     block: &mut Block,
     ext_block: &ExtentTreeNode,
 ) -> Result<(), FileError> {
@@ -242,29 +236,20 @@ pub fn write_external_block(
     }
 
     let serialised = ext_block.serialise();
-
     let end = BLOCK_HEADER_SIZE + serialised.len();
 
     if end > BLOCK_SIZE {
         return Err(FileError::CorruptedBlock);
     }
 
-    block.buf[BLOCK_HEADER_SIZE..end]
-        .copy_from_slice(&serialised);
-
+    block.buf[BLOCK_HEADER_SIZE..end].copy_from_slice(&serialised);
     block.serialise();
-
-    disk.write_all_at(
-        &block.buf,
-        block.id * BLOCK_SIZE as u64,
-    )
-    .map_err(|_| FileError::WriteError)?;
 
     Ok(())
 }
 
 pub fn range_lookup(
-    disk: &File,
+    block_cache: &mut BlockCache,
     node: &ExtentTreeNode,
     start: u64,
     end: u64,
@@ -274,12 +259,12 @@ pub fn range_lookup(
     }
 
     let mut out = Vec::new();
-    collect_range(disk, node, start, end, &mut out)?;
+    collect_range(block_cache, node, start, end, &mut out)?;
     Ok(out)
 }
 
 fn collect_range(
-    disk: &File,
+    block_cache: &mut BlockCache,
     node: &ExtentTreeNode,
     start: u64,
     end: u64,
@@ -311,47 +296,31 @@ fn collect_range(
             break;
         }
 
-        let child = ExtentTreeNode::read_node(
-            disk,
-            node.get_index(i).child_block,
-        )?;
-
-        collect_range(
-            disk,
-            &child,
-            start,
-            end,
-            out,
-        )?;
+        let child =
+            ExtentTreeNode::read_node(block_cache, node.get_index(i).child_block)?;
+        collect_range(block_cache, &child, start, end, out)?;
     }
 
     Ok(())
 }
 
-fn find_child(
-    node: &ExtentTreeNode,
-    logical_start: u64,
-) -> Result<usize, FileError> {
+fn find_child(node: &ExtentTreeNode, logical_start: u64) -> Result<usize, FileError> {
     if node.entries.is_empty() {
         return Err(FileError::CorruptedBlock);
     }
 
-    Ok(
-        (0..node.entries.len())
-            .rev()
-            .find(|&i| {
-                node.get_index(i).logical_start <= logical_start
-            })
-            .unwrap_or(0)
-    )
+    Ok((0..node.entries.len())
+        .rev()
+        .find(|&i| node.get_index(i).logical_start <= logical_start)
+        .unwrap_or(0))
 }
 
 fn insert_into_node(
-    disk: &File,
+    block_cache: &mut BlockCache,
     node: &mut ExtentTreeNode,
     node_block: Option<u64>,
     new_ext: Extent,
-    alloc_block: &mut impl FnMut() -> Result<u64, FileError>,
+    alloc_block: &mut impl FnMut(&mut BlockCache) -> Result<u64, FileError>,
     freed: &mut Vec<Extent>,
 ) -> Result<InsertResult, FileError> {
     let max_entries = if node_block.is_some() {
@@ -361,33 +330,19 @@ fn insert_into_node(
     };
 
     if node.is_leaf() {
-        return insert_leaf(
-            disk,
-            node,
-            new_ext,
-            max_entries,
-            alloc_block,
-            freed,
-        );
+        return insert_leaf(block_cache, node, new_ext, max_entries, alloc_block, freed);
     }
 
     let i = find_child(node, new_ext.logical_start)?;
     let idx = node.get_index(i);
+    let mut child =
+        ExtentTreeNode::read_node_with_block(block_cache, idx.child_block)?;
 
-    let (mut blk, mut child) =
-        ExtentTreeNode::read_node_with_block(
-            disk,
-            idx.child_block,
-        )?;
-
-    let mut indices: Vec<IndexEntry> = node
-        .entries
-        .iter()
-        .map(IndexEntry::from_bytes)
-        .collect();
+    let mut indices: Vec<IndexEntry> =
+        node.entries.iter().map(IndexEntry::from_bytes).collect();
 
     let result = match insert_into_node(
-        disk,
+        block_cache,
         &mut child,
         Some(idx.child_block),
         new_ext,
@@ -395,12 +350,7 @@ fn insert_into_node(
         freed,
     )? {
         InsertResult::Done { new_min } => {
-            write_external_block(
-                disk,
-                &mut blk,
-                &child,
-            )?;
-
+            write_external_block(block_cache.get_mut(idx.child_block)?, &child)?;
             indices[i].logical_start = new_min;
 
             InsertResult::Done {
@@ -413,16 +363,10 @@ fn insert_into_node(
             new_block,
             new_min,
         } => {
-            write_external_block(
-                disk,
-                &mut blk,
-                &child,
-            )?;
-
+            write_external_block(block_cache.get_mut(idx.child_block)?, &child)?;
             indices[i].logical_start = new_min;
 
-            let pos = indices
-                .partition_point(|e| e.logical_start < key);
+            let pos = indices.partition_point(|e| e.logical_start < key);
 
             indices.insert(
                 pos,
@@ -441,28 +385,18 @@ fn insert_into_node(
                 let mid = indices.len() / 2;
                 let right = indices.split_off(mid);
                 let split_key = right[0].logical_start;
-
-                let right_block = alloc_block()?;
+                let right_block = alloc_block(block_cache)?;
 
                 let right_node = ExtentTreeNode {
                     magic: TREE_MAGIC,
                     depth: node.depth,
                     entry_count: right.len() as u16,
                     max_entries: BLOCK_MAX_ENTRIES as u16,
-                    entries: right
-                        .iter()
-                        .map(IndexEntry::to_bytes)
-                        .collect(),
+                    entries: right.iter().map(IndexEntry::to_bytes).collect(),
                 };
 
-                let mut rblk =
-                    Block::deserialise(disk, right_block)?;
-
-                write_external_block(
-                    disk,
-                    &mut rblk,
-                    &right_node,
-                )?;
+                let rblk = block_cache.get_mut(right_block)?;
+                write_external_block(rblk, &right_node)?;
 
                 InsertResult::Split {
                     key: split_key,
@@ -473,43 +407,31 @@ fn insert_into_node(
         }
     };
 
-    node.entries = indices
-        .iter()
-        .map(IndexEntry::to_bytes)
-        .collect();
-
+    node.entries = indices.iter().map(IndexEntry::to_bytes).collect();
     node.entry_count = indices.len() as u16;
 
     Ok(result)
 }
 
 fn insert_leaf(
-    disk: &File,
+    block_cache: &mut BlockCache,
     node: &mut ExtentTreeNode,
     new_ext: Extent,
     max_entries: u16,
-    alloc_block: &mut impl FnMut() -> Result<u64, FileError>,
+    alloc_block: &mut impl FnMut(&mut BlockCache) -> Result<u64, FileError>,
     freed: &mut Vec<Extent>,
 ) -> Result<InsertResult, FileError> {
-    let existing: Vec<Extent> = node
-        .entries
-        .iter()
-        .map(Extent::from_bytes)
-        .collect();
-
+    let existing: Vec<Extent> = node.entries.iter().map(Extent::from_bytes).collect();
     let new_start = new_ext.logical_start;
-
     let new_end = new_ext
         .logical_start
         .checked_add(new_ext.length)
         .ok_or(FileError::CorruptedBlock)?;
 
-    let mut extents: Vec<Extent> =
-        Vec::with_capacity(existing.len() + 2);
+    let mut extents: Vec<Extent> = Vec::with_capacity(existing.len() + 2);
 
     for e in existing {
         let e_start = e.logical_start;
-
         let e_end = e
             .logical_start
             .checked_add(e.length)
@@ -522,9 +444,7 @@ fn insert_leaf(
 
         let overlap_start = e_start.max(new_start);
         let overlap_end = e_end.min(new_end);
-
         let physical_offset = overlap_start - e_start;
-
         let overlap_physical_start = e
             .physical_start
             .checked_add(physical_offset)
@@ -546,7 +466,6 @@ fn insert_leaf(
 
         if e_end > new_end {
             let logical_offset = new_end - e_start;
-
             let physical_start = e
                 .physical_start
                 .checked_add(logical_offset)
@@ -560,8 +479,7 @@ fn insert_leaf(
         }
     }
 
-    let pos = extents
-        .partition_point(|e| e.logical_start < new_start);
+    let pos = extents.partition_point(|e| e.logical_start < new_start);
 
     let merges_with_prev = pos > 0 && {
         let prev = &extents[pos - 1];
@@ -571,8 +489,7 @@ fn insert_leaf(
             .checked_add(prev.length)
             .ok_or(FileError::CorruptedBlock)?;
 
-        prev.logical_end() == new_start
-            && prev_physical_end == new_ext.physical_start
+        prev.logical_end() == new_start && prev_physical_end == new_ext.physical_start
     };
 
     let merges_with_next = pos < extents.len() && {
@@ -583,8 +500,7 @@ fn insert_leaf(
             .checked_add(new_ext.length)
             .ok_or(FileError::CorruptedBlock)?;
 
-        new_end == next.logical_start
-            && new_physical_end == next.physical_start
+        new_end == next.logical_start && new_physical_end == next.physical_start
     };
 
     match (merges_with_prev, merges_with_next) {
@@ -626,11 +542,7 @@ fn insert_leaf(
     }
 
     if extents.len() <= max_entries as usize {
-        node.entries = extents
-            .iter()
-            .map(Extent::to_bytes)
-            .collect();
-
+        node.entries = extents.iter().map(Extent::to_bytes).collect();
         node.entry_count = extents.len() as u16;
 
         Ok(InsertResult::Done {
@@ -639,37 +551,23 @@ fn insert_leaf(
     } else {
         let mid = extents.len() / 2;
         let right = extents.split_off(mid);
-
         let key = right[0].logical_start;
 
-        node.entries = extents
-            .iter()
-            .map(Extent::to_bytes)
-            .collect();
-
+        node.entries = extents.iter().map(Extent::to_bytes).collect();
         node.entry_count = extents.len() as u16;
 
-        let right_block = alloc_block()?;
+        let right_block = alloc_block(block_cache)?;
 
         let right_node = ExtentTreeNode {
             magic: TREE_MAGIC,
             depth: node.depth,
             entry_count: right.len() as u16,
             max_entries: BLOCK_MAX_ENTRIES as u16,
-            entries: right
-                .iter()
-                .map(Extent::to_bytes)
-                .collect(),
+            entries: right.iter().map(Extent::to_bytes).collect(),
         };
 
-        let mut blk =
-            Block::deserialise(disk, right_block)?;
-
-        write_external_block(
-            disk,
-            &mut blk,
-            &right_node,
-        )?;
+        let mut blk = block_cache.get_mut(right_block)?;
+        write_external_block(&mut blk, &right_node)?;
 
         Ok(InsertResult::Split {
             key,
@@ -680,41 +578,48 @@ fn insert_leaf(
 }
 
 pub fn insert_extent(
-    disk: &File,
+    block_cache: &mut BlockCache,
     root: &mut ExtentTreeNode,
     new_ext: Extent,
-    alloc_block: &mut impl FnMut() -> Result<u64, FileError>,
+    alloc_block: &mut impl FnMut(&mut BlockCache) -> Result<u64, FileError>,
 ) -> Result<Vec<Extent>, FileError> {
-    let end = new_ext.logical_start.checked_add(new_ext.length)
+    let end = new_ext
+        .logical_start
+        .checked_add(new_ext.length)
         .ok_or(FileError::CorruptedBlock)?;
+
     let mut freed = Vec::new();
     let mut cur = new_ext.logical_start;
+
     while cur < end {
-        let piece_end = match next_leaf_boundary(disk, root, cur)? {
+        let piece_end = match next_leaf_boundary(block_cache, root, cur)? {
             Some(b) => b.min(end),
             None => end,
         };
+
         let piece = Extent {
             logical_start: cur,
             physical_start: new_ext.physical_start + (cur - new_ext.logical_start),
             length: piece_end - cur,
         };
-        freed.extend(insert_extent_one(disk, root, piece, alloc_block)?);
+
+        freed.extend(insert_extent_one(block_cache, root, piece, alloc_block)?);
         cur = piece_end;
     }
+
     Ok(freed)
 }
 
 pub fn insert_extent_one(
-    disk: &File,
+    block_cache: &mut BlockCache,
     root: &mut ExtentTreeNode,
     new_ext: Extent,
-    alloc_block: &mut impl FnMut() -> Result<u64, FileError>,
+    alloc_block: &mut impl FnMut(&mut BlockCache) -> Result<u64, FileError>
 ) -> Result<Vec<Extent>, FileError> {
     let mut freed: Vec<Extent> = Vec::new();
 
     match insert_into_node(
-        disk,
+        block_cache,
         root,
         None,
         new_ext,
@@ -728,7 +633,7 @@ pub fn insert_extent_one(
             new_block,
             ..
         } => {
-            let left_block = alloc_block()?;
+            let left_block = alloc_block(block_cache)?;
 
             let left_node = ExtentTreeNode {
                 magic: TREE_MAGIC,
@@ -738,14 +643,8 @@ pub fn insert_extent_one(
                 entries: root.entries.clone(),
             };
 
-            let mut blk =
-                Block::deserialise(disk, left_block)?;
-
-            write_external_block(
-                disk,
-                &mut blk,
-                &left_node,
-            )?;
+            let blk = block_cache.get_mut(left_block)?;
+            write_external_block(blk, &left_node)?;
 
             let left_key = if root.is_leaf() {
                 left_node.get_extent(0).logical_start
@@ -768,10 +667,7 @@ pub fn insert_extent_one(
             root.depth += 1;
             root.max_entries = ROOT_MAX_ENTRIES as u16;
             root.entry_count = 2;
-            root.entries = vec![
-                left_idx.to_bytes(),
-                right_idx.to_bytes(),
-            ];
+            root.entries = vec![left_idx.to_bytes(), right_idx.to_bytes()];
 
             Ok(freed)
         }
@@ -779,14 +675,13 @@ pub fn insert_extent_one(
 }
 
 pub fn lookup_extent(
-    disk: &File,
+    block_cache: &mut BlockCache,
     node: &ExtentTreeNode,
     logical: u64,
 ) -> Result<Option<Extent>, FileError> {
     if node.is_leaf() {
         for entry in &node.entries {
             let e = Extent::from_bytes(entry);
-
             let e_end = e
                 .logical_start
                 .checked_add(e.length)
@@ -800,13 +695,9 @@ pub fn lookup_extent(
         Ok(None)
     } else {
         let i = find_child(node, logical)?;
-
-        let child = ExtentTreeNode::read_node(
-            disk,
-            node.get_index(i).child_block,
-        )?;
-
-        lookup_extent(disk, &child, logical)
+        let child =
+            ExtentTreeNode::read_node(block_cache, node.get_index(i).child_block)?;
+        lookup_extent(block_cache, &child, logical)
     }
 }
 
@@ -815,38 +706,22 @@ fn min_entries(max_entries: u16) -> u16 {
 }
 
 fn collect_and_clear_tree(
-    disk: &File,
+    block_cache: &mut BlockCache,
     node: &mut ExtentTreeNode,
     free_block: &mut impl FnMut(u64) -> Result<(), FileError>,
     freed: &mut Vec<Extent>,
 ) -> Result<(), FileError> {
     if node.is_leaf() {
-        freed.extend(
-            node.entries
-                .iter()
-                .map(Extent::from_bytes),
-        );
+        freed.extend(node.entries.iter().map(Extent::from_bytes));
     } else {
-        let children: Vec<IndexEntry> = node
-            .entries
-            .iter()
-            .map(IndexEntry::from_bytes)
-            .collect();
+        let children: Vec<IndexEntry> =
+            node.entries.iter().map(IndexEntry::from_bytes).collect();
 
         for child_index in children {
             let mut child =
-                ExtentTreeNode::read_node(
-                    disk,
-                    child_index.child_block,
-                )?;
+                ExtentTreeNode::read_node(block_cache, child_index.child_block)?;
 
-            collect_and_clear_tree(
-                disk,
-                &mut child,
-                free_block,
-                freed,
-            )?;
-
+            collect_and_clear_tree(block_cache, &mut child, free_block, freed)?;
             free_block(child_index.child_block)?;
         }
     }
@@ -865,18 +740,11 @@ fn delete_leaf(
     end: u64,
     freed: &mut Vec<Extent>,
 ) -> Result<DeleteResult, FileError> {
-    let existing: Vec<Extent> = node
-        .entries
-        .iter()
-        .map(Extent::from_bytes)
-        .collect();
-
-    let mut remaining: Vec<Extent> =
-        Vec::with_capacity(existing.len() + 1);
+    let existing: Vec<Extent> = node.entries.iter().map(Extent::from_bytes).collect();
+    let mut remaining: Vec<Extent> = Vec::with_capacity(existing.len() + 1);
 
     for e in existing {
         let e_start = e.logical_start;
-
         let e_end = e
             .logical_start
             .checked_add(e.length)
@@ -889,9 +757,7 @@ fn delete_leaf(
 
         let overlap_start = e_start.max(start);
         let overlap_end = e_end.min(end);
-
         let physical_offset = overlap_start - e_start;
-
         let physical_start = e
             .physical_start
             .checked_add(physical_offset)
@@ -913,7 +779,6 @@ fn delete_leaf(
 
         if e_end > end {
             let off = end - e_start;
-
             let physical_start = e
                 .physical_start
                 .checked_add(off)
@@ -927,11 +792,7 @@ fn delete_leaf(
         }
     }
 
-    node.entries = remaining
-        .iter()
-        .map(Extent::to_bytes)
-        .collect();
-
+    node.entries = remaining.iter().map(Extent::to_bytes).collect();
     node.entry_count = remaining.len() as u16;
 
     if node.entry_count < min_entries(node.max_entries) {
@@ -942,7 +803,7 @@ fn delete_leaf(
 }
 
 fn delete_from_node(
-    disk: &File,
+    block_cache: &mut BlockCache,
     node: &mut ExtentTreeNode,
     node_block: Option<u64>,
     start: u64,
@@ -957,25 +818,16 @@ fn delete_from_node(
     };
 
     if node.is_leaf() {
-        return delete_leaf(
-            node,
-            start,
-            end,
-            freed,
-        );
+        return delete_leaf(node, start, end, freed);
     }
 
     let i = find_child(node, start)?;
     let idx = node.get_index(i);
-
-    let (mut child_blk, mut child) =
-        ExtentTreeNode::read_node_with_block(
-            disk,
-            idx.child_block,
-        )?;
+    let mut child =
+        ExtentTreeNode::read_node_with_block(block_cache, idx.child_block)?;
 
     let child_result = delete_from_node(
-        disk,
+        block_cache,
         &mut child,
         Some(idx.child_block),
         start,
@@ -984,19 +836,12 @@ fn delete_from_node(
         freed,
     )?;
 
-    let mut indices: Vec<IndexEntry> = node
-        .entries
-        .iter()
-        .map(IndexEntry::from_bytes)
-        .collect();
+    let mut indices: Vec<IndexEntry> =
+        node.entries.iter().map(IndexEntry::from_bytes).collect();
 
     match child_result {
         DeleteResult::Done => {
-            write_external_block(
-                disk,
-                &mut child_blk,
-                &child,
-            )?;
+            write_external_block(block_cache.get_mut(idx.child_block)?, &child)?;
 
             if child.entry_count > 0 {
                 indices[i].logical_start = if child.is_leaf() {
@@ -1006,11 +851,7 @@ fn delete_from_node(
                 };
             }
 
-            node.entries = indices
-                .iter()
-                .map(IndexEntry::to_bytes)
-                .collect();
-
+            node.entries = indices.iter().map(IndexEntry::to_bytes).collect();
             node.entry_count = indices.len() as u16;
 
             Ok(DeleteResult::Done)
@@ -1020,18 +861,12 @@ fn delete_from_node(
             if indices.len() == 1 {
                 if child.entry_count == 0 {
                     free_block(idx.child_block)?;
-
                     node.entries.clear();
                     node.entry_count = 0;
-
                     return Ok(DeleteResult::Underflow);
                 }
 
-                write_external_block(
-                    disk,
-                    &mut child_blk,
-                    &child,
-                )?;
+                write_external_block(block_cache.get_mut(idx.child_block)?, &child)?;
 
                 indices[i].logical_start = if child.is_leaf() {
                     child.get_extent(0).logical_start
@@ -1039,32 +874,21 @@ fn delete_from_node(
                     child.get_index(0).logical_start
                 };
 
-                node.entries = indices
-                    .iter()
-                    .map(IndexEntry::to_bytes)
-                    .collect();
-
+                node.entries = indices.iter().map(IndexEntry::to_bytes).collect();
                 node.entry_count = indices.len() as u16;
 
                 return Ok(DeleteResult::Done);
             }
 
-            let sibling_min =
-                min_entries(BLOCK_MAX_ENTRIES as u16);
+            let sibling_min = min_entries(BLOCK_MAX_ENTRIES as u16);
 
             if i > 0 {
-                let (mut left_blk, mut left) =
-                    ExtentTreeNode::read_node_with_block(
-                        disk,
-                        indices[i - 1].child_block,
-                    )?;
+                let left_block = indices[i - 1].child_block;
+                let mut left = ExtentTreeNode::read_node(block_cache, left_block)?;
 
                 if left.entry_count > sibling_min {
-                    let borrowed = left
-                        .entries
-                        .pop()
-                        .ok_or(FileError::CorruptedBlock)?;
-
+                    let borrowed =
+                        left.entries.pop().ok_or(FileError::CorruptedBlock)?;
                     left.entry_count -= 1;
 
                     child.entries.insert(0, borrowed);
@@ -1076,35 +900,19 @@ fn delete_from_node(
                         child.get_index(0).logical_start
                     };
 
-                    node.entries = indices
-                        .iter()
-                        .map(IndexEntry::to_bytes)
-                        .collect();
-
+                    node.entries = indices.iter().map(IndexEntry::to_bytes).collect();
                     node.entry_count = indices.len() as u16;
 
-                    write_external_block(
-                        disk,
-                        &mut left_blk,
-                        &left,
-                    )?;
-
-                    write_external_block(
-                        disk,
-                        &mut child_blk,
-                        &child,
-                    )?;
+                    write_external_block(block_cache.get_mut(left_block)?, &left)?;
+                    write_external_block(block_cache.get_mut(idx.child_block)?, &child)?;
 
                     return Ok(DeleteResult::Done);
                 }
             }
 
             if i + 1 < indices.len() {
-                let (mut right_blk, mut right) =
-                    ExtentTreeNode::read_node_with_block(
-                        disk,
-                        indices[i + 1].child_block,
-                    )?;
+                let right_block = indices[i + 1].child_block;
+                let mut right = ExtentTreeNode::read_node(block_cache, right_block)?;
 
                 if right.entry_count > sibling_min {
                     let borrowed = right
@@ -1131,69 +939,33 @@ fn delete_from_node(
                         right.get_index(0).logical_start
                     };
 
-                    node.entries = indices
-                        .iter()
-                        .map(IndexEntry::to_bytes)
-                        .collect();
-
+                    node.entries = indices.iter().map(IndexEntry::to_bytes).collect();
                     node.entry_count = indices.len() as u16;
 
-                    write_external_block(
-                        disk,
-                        &mut right_blk,
-                        &right,
-                    )?;
-
-                    write_external_block(
-                        disk,
-                        &mut child_blk,
-                        &child,
-                    )?;
+                    write_external_block(block_cache.get_mut(right_block)?, &right)?;
+                    write_external_block(block_cache.get_mut(idx.child_block)?, &child)?;
 
                     return Ok(DeleteResult::Done);
                 }
             }
 
             if i > 0 {
-                let (mut left_blk, mut left) =
-                    ExtentTreeNode::read_node_with_block(
-                        disk,
-                        indices[i - 1].child_block,
-                    )?;
+                let left_block = indices[i - 1].child_block;
+                let mut left = ExtentTreeNode::read_node(block_cache, left_block)?;
 
-                left.entries.extend(
-                    child.entries.iter().cloned()
-                );
+                left.entries.extend(child.entries.iter().cloned());
+                left.entry_count = left.entries.len() as u16;
 
-                left.entry_count =
-                    left.entries.len() as u16;
-
-                write_external_block(
-                    disk,
-                    &mut left_blk,
-                    &left,
-                )?;
-
+                write_external_block(block_cache.get_mut(left_block)?, &left)?;
                 free_block(idx.child_block)?;
-
                 indices.remove(i);
             } else {
-                let right_idx = indices
-                    .get(i + 1)
-                    .ok_or(FileError::CorruptedBlock)?;
+                let right_idx = indices.get(i + 1).ok_or(FileError::CorruptedBlock)?;
+                let right_block = right_idx.child_block;
+                let right = ExtentTreeNode::read_node(block_cache, right_block)?;
 
-                let (_right_blk, right) =
-                    ExtentTreeNode::read_node_with_block(
-                        disk,
-                        right_idx.child_block,
-                    )?;
-
-                child.entries.extend(
-                    right.entries.iter().cloned()
-                );
-
-                child.entry_count =
-                    child.entries.len() as u16;
+                child.entries.extend(right.entries.iter().cloned());
+                child.entry_count = child.entries.len() as u16;
 
                 if child.entry_count == 0 {
                     return Err(FileError::CorruptedBlock);
@@ -1205,22 +977,14 @@ fn delete_from_node(
                     child.get_index(0).logical_start
                 };
 
-                write_external_block(
-                    disk,
-                    &mut child_blk,
-                    &child,
-                )?;
-
-                free_block(
-                    indices[i + 1].child_block
-                )?;
+                write_external_block(block_cache.get_mut(idx.child_block)?, &child)?;
+                free_block(right_block)?;
                 indices.remove(i + 1);
             }
-            node.entries = indices
-                .iter()
-                .map(IndexEntry::to_bytes)
-                .collect();
+
+            node.entries = indices.iter().map(IndexEntry::to_bytes).collect();
             node.entry_count = indices.len() as u16;
+
             if node.entry_count < min_entries(max_entries) {
                 Ok(DeleteResult::Underflow)
             } else {
@@ -1231,7 +995,7 @@ fn delete_from_node(
 }
 
 pub fn delete_extent_range(
-    disk: &File,
+    block_cache: &mut BlockCache,
     root: &mut ExtentTreeNode,
     start: u64,
     end: u64,
@@ -1240,26 +1004,33 @@ pub fn delete_extent_range(
     if start >= end {
         return Ok(Vec::new());
     }
+
     let mut freed = Vec::new();
+
     if start == 0 && end == u64::MAX {
-        collect_and_clear_tree(disk, root, free_block, &mut freed)?;
+        collect_and_clear_tree(block_cache, root, free_block, &mut freed)?;
         return Ok(freed);
     }
+
     let mut cur = start;
+
     while cur < end {
         if root.is_leaf() && root.entry_count == 0 {
             break;
         }
+
         if !root.is_leaf() && root.entry_count == 0 {
             break;
         }
-        let piece_end = match next_leaf_boundary(disk, root, cur)? {
+
+        let piece_end = match next_leaf_boundary(block_cache, root, cur)? {
             Some(b) if b > cur => b.min(end),
             _ => end,
         };
-        if !range_lookup(disk, root, cur, piece_end)?.is_empty() {
+
+        if !range_lookup(block_cache, root, cur, piece_end)?.is_empty() {
             delete_from_node(
-                disk,
+                block_cache,
                 root,
                 None,
                 cur,
@@ -1268,8 +1039,10 @@ pub fn delete_extent_range(
                 &mut freed,
             )?;
         }
+
         cur = piece_end;
     }
+
     while !root.is_leaf() {
         if root.entry_count == 0 {
             root.depth = 0;
@@ -1277,19 +1050,25 @@ pub fn delete_extent_range(
             root.max_entries = ROOT_MAX_ENTRIES as u16;
             break;
         }
+
         if root.entry_count != 1 {
             break;
         }
+
         let only_child_block = root.get_index(0).child_block;
-        let child = ExtentTreeNode::read_node(disk, only_child_block)?;
+        let child = ExtentTreeNode::read_node(block_cache, only_child_block)?;
+
         if child.entry_count as usize > ROOT_MAX_ENTRIES {
             break;
         }
+
         root.depth = child.depth;
         root.entries = child.entries;
         root.entry_count = child.entry_count;
         root.max_entries = ROOT_MAX_ENTRIES as u16;
+
         free_block(only_child_block)?;
     }
+
     Ok(freed)
 }

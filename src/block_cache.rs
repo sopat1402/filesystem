@@ -1,211 +1,208 @@
-use crate::block::{SuperBlock, Block};
+use crate::block::{Block, SuperBlock};
 use crate::file_errors::FileError;
 use std::collections::HashMap;
+use std::fs::File;
+use std::os::unix::fs::FileExt;
 
-const MAX_ENTRIES: usize = 64;
+const DEFAULT_CAPACITY: usize = 256;
+
+type SlotId = usize;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum CacheKey {
+    Superblock,
+    Block(u64),
+}
+
+enum Payload {
+    Superblock(SuperBlock),
+    Block(Block),
+}
 
 struct CacheEntry {
-    key   : u64,
-    block : Block,
-    dirty : bool,
-    prev  : Option<usize>,
-    next  : Option<usize>,
+    key:     CacheKey,
+    payload: Payload,
+    dirty:   bool,
+    newer:   Option<SlotId>, // towards most recently used
+    older:   Option<SlotId>, // towards least recently used
 }
 
-struct Lru {
-    head    : Option<usize>,
-    tail    : Option<usize>,
-    entries : Vec<Option<CacheEntry>>,
-    trash   : Vec<usize>,
-    map     : HashMap<u64, usize>,
-}
-
-impl Lru {
-    fn new() -> Self {
-        Self { head: None, tail: None, entries: Vec::new(), trash: Vec::new(), map: HashMap::new() }
-    }
-
-    fn unlink(&mut self, idx: usize) {
-        let (prev, next) = {
-            let e = self.entries[idx].as_ref().unwrap();
-            (e.prev, e.next)
-        };
-        match prev {
-            Some(p) => self.entries[p].as_mut().unwrap().next = next,
-            None => self.head = next,
+impl CacheEntry {
+    fn write_back(&mut self, disk: &File) -> Result<(), FileError> {
+        match &mut self.payload {
+            Payload::Block(block) => block.write_block(disk)?,
+            Payload::Superblock(sb) => {
+                let buf = sb.serialise();
+                disk.write_all_at(&buf, 0).map_err(|_| FileError::WriteError)?;
+            }
         }
-        match next {
-            Some(n) => self.entries[n].as_mut().unwrap().prev = prev,
-            None => self.tail = prev,
-        }
-    }
-
-    fn push_head(&mut self, idx: usize) {
-        let old_head = self.head;
-        {
-            let e = self.entries[idx].as_mut().unwrap();
-            e.prev = None;
-            e.next = old_head;
-        }
-        if let Some(h) = old_head {
-            self.entries[h].as_mut().unwrap().prev = Some(idx);
-        }
-        self.head = Some(idx);
-        if self.tail.is_none() {
-            self.tail = Some(idx);
-        }
-    }
-
-    fn move_to_head(&mut self, idx: usize) {
-        if self.head == Some(idx) {
-            return;
-        }
-        self.unlink(idx);
-        self.push_head(idx);
-    }
-
-    fn evict_tail(&mut self) -> Option<CacheEntry> {
-        let tail_idx = self.tail?;
-        self.unlink(tail_idx);
-        let entry = self.entries[tail_idx].take().unwrap();
-        self.map.remove(&entry.key);
-        self.trash.push(tail_idx);
-        Some(entry)
-    }
-
-    fn alloc_slot(&mut self) -> usize {
-        if let Some(slot) = self.trash.pop() {
-            slot
-        } else {
-            self.entries.push(None);
-            self.entries.len() - 1
-        }
-    }
-
-    fn insert(&mut self, key: u64, block: Block, dirty: bool) -> Option<CacheEntry> {
-        let evicted = if self.entries.len() - self.trash.len() >= MAX_ENTRIES {
-            self.evict_tail()
-        } else {
-            None
-        };
-        let idx = self.alloc_slot();
-        self.entries[idx] = Some(CacheEntry { key, block, dirty, prev: None, next: None });
-        self.push_head(idx);
-        self.map.insert(key, idx);
-        evicted
-    }
-
-    fn index_of(&mut self, key: u64) -> Option<usize> {
-        let idx = *self.map.get(&key)?;
-        self.move_to_head(idx);
-        Some(idx)
+        self.dirty = false;
+        Ok(())
     }
 }
 
 pub struct BlockCache {
-    disk       : std::fs::File,
-    data_start : u64,
-    superblock : Option<(SuperBlock, bool)>,
-    pinned     : HashMap<u64, CacheEntry>,
-    lru        : Lru,
+    disk:       File,
+    capacity:   usize,
+    entries:    Vec<Option<CacheEntry>>,
+    free_slots: Vec<SlotId>,
+    index:      HashMap<CacheKey, SlotId>,
+    newest:     Option<SlotId>,
+    oldest:     Option<SlotId>,
 }
 
 impl BlockCache {
-    pub fn new(disk: std::fs::File, data_start: u64) -> Self {
-        Self { disk, data_start, superblock: None, pinned: HashMap::new(), lru: Lru::new() }
+    pub fn new(disk: File) -> Self {
+        Self::with_capacity(disk, DEFAULT_CAPACITY)
     }
 
-    fn is_pinned(&self, block_id: u64) -> bool {
-        block_id < self.data_start
-    }
-
-    fn fetch_pinned(&mut self, block_id: u64) -> Result<(), FileError> {
-        if self.pinned.contains_key(&block_id) {
-            return Ok(());
+    pub fn with_capacity(disk: File, capacity: usize) -> Self {
+        assert!(capacity >= 1, "cache capacity must be at least 1");
+        Self {
+            disk,
+            capacity,
+            entries: Vec::new(),
+            free_slots: Vec::new(),
+            index: HashMap::new(),
+            newest: None,
+            oldest: None,
         }
-        let block = Block::deserialise(&self.disk, block_id)?;
-        self.pinned.insert(block_id, CacheEntry { key: block_id, block, dirty: false, prev: None, next: None });
-        Ok(())
     }
 
-    fn fetch_lru(&mut self, block_id: u64) -> Result<(), FileError> {
-        if self.lru.index_of(block_id).is_some() {
-            return Ok(());
+    fn entry(&self, slot: SlotId) -> &CacheEntry {
+        self.entries[slot].as_ref().expect("slot is empty")
+    }
+
+    fn entry_mut(&mut self, slot: SlotId) -> &mut CacheEntry {
+        self.entries[slot].as_mut().expect("slot is empty")
+    }
+
+    fn detach(&mut self, slot: SlotId) {
+        let (newer, older) = {
+            let e = self.entry(slot);
+            (e.newer, e.older)
+        };
+        match newer {
+            Some(n) => self.entry_mut(n).older = older,
+            None => self.newest = older,
         }
-        let block = Block::deserialise(&self.disk, block_id)?;
-        if let Some(mut evicted) = self.lru.insert(block_id, block, false) {
-            if evicted.dirty {
-                evicted.block.write_block(&self.disk)?;
+        match older {
+            Some(o) => self.entry_mut(o).newer = newer,
+            None => self.oldest = newer,
+        }
+    }
+
+    fn attach_newest(&mut self, slot: SlotId) {
+        let previous_newest = self.newest;
+        {
+            let e = self.entry_mut(slot);
+            e.newer = None;
+            e.older = previous_newest;
+        }
+        if let Some(p) = previous_newest {
+            self.entry_mut(p).newer = Some(slot);
+        }
+        self.newest = Some(slot);
+        if self.oldest.is_none() {
+            self.oldest = Some(slot);
+        }
+    }
+
+    fn mark_used(&mut self, slot: SlotId) {
+        if self.newest != Some(slot) {
+            self.detach(slot);
+            self.attach_newest(slot);
+        }
+    }
+
+    fn evict_until_room(&mut self) -> Result<(), FileError> {
+        while self.index.len() >= self.capacity {
+            let Some(slot) = self.oldest else { break };
+            if self.entry(slot).dirty {
+                self.entries[slot].as_mut().unwrap().write_back(&self.disk)?;
             }
+            self.detach(slot);
+            let victim = self.entries[slot].take().unwrap();
+            self.index.remove(&victim.key);
+            self.free_slots.push(slot);
         }
         Ok(())
+    }
+
+    fn claim_slot(&mut self) -> SlotId {
+        self.free_slots.pop().unwrap_or_else(|| {
+            self.entries.push(None);
+            self.entries.len() - 1
+        })
+    }
+
+    fn fetch(&mut self, key: CacheKey) -> Result<SlotId, FileError> {
+        if let Some(&slot) = self.index.get(&key) {
+            self.mark_used(slot);
+            return Ok(slot);
+        }
+
+        let payload = match key {
+            CacheKey::Superblock => Payload::Superblock(SuperBlock::deserialise(&self.disk)?),
+            CacheKey::Block(id) => Payload::Block(Block::deserialise(&self.disk, id)?),
+        };
+
+        self.evict_until_room()?;
+        let slot = self.claim_slot();
+        self.entries[slot] = Some(CacheEntry { key, payload, dirty: false, newer: None, older: None });
+        self.attach_newest(slot);
+        self.index.insert(key, slot);
+        Ok(slot)
     }
 
     pub fn get(&mut self, block_id: u64) -> Result<&Block, FileError> {
-        if self.is_pinned(block_id) {
-            self.fetch_pinned(block_id)?;
-            return Ok(&self.pinned[&block_id].block);
+        let slot = self.fetch(CacheKey::Block(block_id))?;
+        match &self.entry(slot).payload {
+            Payload::Block(block) => Ok(block),
+            Payload::Superblock(_) => unreachable!(),
         }
-        self.fetch_lru(block_id)?;
-        let idx = self.lru.map[&block_id];
-        Ok(&self.lru.entries[idx].as_ref().unwrap().block)
     }
 
     pub fn get_mut(&mut self, block_id: u64) -> Result<&mut Block, FileError> {
-        if self.is_pinned(block_id) {
-            self.fetch_pinned(block_id)?;
-            let entry = self.pinned.get_mut(&block_id).unwrap();
-            entry.dirty = true;
-            return Ok(&mut entry.block);
-        }
-        self.fetch_lru(block_id)?;
-        let idx = self.lru.map[&block_id];
-        let entry = self.lru.entries[idx].as_mut().unwrap();
+        let slot = self.fetch(CacheKey::Block(block_id))?;
+        let entry = self.entry_mut(slot);
         entry.dirty = true;
-        Ok(&mut entry.block)
+        match &mut entry.payload {
+            Payload::Block(block) => Ok(block),
+            Payload::Superblock(_) => unreachable!(),
+        }
     }
 
     pub fn get_superblock(&mut self) -> Result<&SuperBlock, FileError> {
-        if self.superblock.is_none() {
-            let sb = SuperBlock::deserialise(&self.disk)?;
-            self.superblock = Some((sb, false));
+        let slot = self.fetch(CacheKey::Superblock)?;
+        match &self.entry(slot).payload {
+            Payload::Superblock(sb) => Ok(sb),
+            Payload::Block(_) => unreachable!(),
         }
-        Ok(&self.superblock.as_ref().unwrap().0)
     }
 
     pub fn get_superblock_mut(&mut self) -> Result<&mut SuperBlock, FileError> {
-        if self.superblock.is_none() {
-            let sb = SuperBlock::deserialise(&self.disk)?;
-            self.superblock = Some((sb, false));
+        let slot = self.fetch(CacheKey::Superblock)?;
+        let entry = self.entry_mut(slot);
+        entry.dirty = true;
+        match &mut entry.payload {
+            Payload::Superblock(sb) => Ok(sb),
+            Payload::Block(_) => unreachable!(),
         }
-        let entry = self.superblock.as_mut().unwrap();
-        entry.1 = true;
-        Ok(&mut entry.0)
     }
 
     pub fn flush(&mut self) -> Result<(), FileError> {
-        if let Some((sb, dirty)) = self.superblock.as_mut() {
-            if *dirty {
-                let buf = sb.serialise();
-                use std::os::unix::prelude::FileExt;
-                self.disk.write_all_at(&buf, 0).map_err(|_| FileError::WriteError)?;
-                *dirty = false;
-            }
-        }
-        for entry in self.pinned.values_mut() {
+        for entry in self.entries.iter_mut().flatten() {
             if entry.dirty {
-                entry.block.write_block(&self.disk)?;
-                entry.dirty = false;
+                entry.write_back(&self.disk)?;
             }
         }
-        for slot in self.lru.entries.iter_mut() {
-            if let Some(entry) = slot {
-                if entry.dirty {
-                    entry.block.write_block(&self.disk)?;
-                    entry.dirty = false;
-                }
-            }
-        }
-        Ok(())
+        self.disk.sync_all().map_err(|_| FileError::WriteError)
+    }
+}
+
+impl Drop for BlockCache {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
