@@ -7,7 +7,7 @@ use filesystem::inode::{find_inode, write_inode};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 const ROOT: u64 = ROOT_INODE_NUM as u64;
-const DISK_SIZE: u64 = 32 * 1024 * 1024;
+const DISK_SIZE: u64 = 128 * 1024 * 1024;
 const INODE_RATIO: u64 = 16 * 1024;
 const PAYLOAD: usize = BLOCK_SIZE - BLOCK_HEADER_SIZE;
 fn pattern(len: usize, seed: u32) -> Vec<u8> {
@@ -86,8 +86,8 @@ impl Ctx<'_> {
 }
 fn main() -> Result<(), FileError> {
     let args: Vec<String> = std::env::args().collect();
-    let image = args.get(1).cloned().unwrap_or_else(|| "devfs.img".to_string());
-    let out = PathBuf::from(args.get(2).cloned().unwrap_or_else(|| "devfs-reference".to_string()));
+    let image = args.get(1).cloned().unwrap_or_else(|| "code.img".to_string());
+    let out = PathBuf::from(args.get(2).cloned().unwrap_or_else(|| "code-reference".to_string()));
     let uid = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(unsafe { libc::getuid() });
     let gid = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(unsafe { libc::getgid() });
     if Path::new(&image).exists() || out.exists() {

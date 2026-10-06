@@ -499,3 +499,16 @@ as the first ever disk on this system that worked.
 I tried git init but that needs opcode 12 for renaming and oops I forgot to implement renaming a dirent.
 HOLY SHIT. I implemented rename. Opcodes 21, 22, 23, 24 for XATTR aren't there but I was able to make a git repo
 INSIDE MY FILESYSTEM, stage files and commit in there. mv works too.
+
+# Block cache
+
+Simple stuff tbh. I have done this before with a page cache in my database. I'll pay special attention to correctness
+of operations to avoid debugging later. But now the main thing after making the cache is fixing the decentralised
+block and superblock deserialise calls everywhere. Everything comes through the block cache. It commits when the log
+added later tells it to. There is no write block that other functions will call anymore. This will be a serious
+code cleanup. After that I'll fix the block allocation algorithm to use locality like ext4 instead of the current
+greedy algorithm. Then concurrency for a functional v1 and then the WAL.
+
+K so I wrote the cache. It passes mutable references and immutable references and marks it dirty there itself. No
+managing cloned bs. The technical term is a write back LRU. Anyways, I'll commit here and then start fixing all the
+calls to it all over. Will have lot of errors for a bit and a lot of untangling.
